@@ -1,0 +1,5 @@
+node_modules/
+.wisdom/
+.claude/
+.docs/
+.env

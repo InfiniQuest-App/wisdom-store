@@ -1,0 +1,34 @@
+{
+  "name": "wisdom-store",
+  "version": "0.1.0",
+  "description": "MCP server that gives AI coding assistants persistent memory, context control, and anti-hallucination tools",
+  "type": "module",
+  "license": "MIT",
+  "main": "src/mcp-server/index.js",
+  "bin": {
+    "wisdom-store": "src/mcp-server/index.js"
+  },
+  "scripts": {
+    "start": "node src/mcp-server/index.js",
+    "inspector": "npx @modelcontextprotocol/inspector node src/mcp-server/index.js"
+  },
+  "keywords": [
+    "mcp",
+    "claude",
+    "ai-memory",
+    "context-management",
+    "anti-hallucination",
+    "model-context-protocol"
+  ],
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/InfiniQuest-App/wisdom-store.git"
+  },
+  "dependencies": {
+    "@ast-grep/napi": "^0.41.0",
+    "@modelcontextprotocol/sdk": "^1.0.0"
+  }
+}
