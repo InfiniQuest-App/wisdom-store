@@ -28,6 +28,7 @@ import { handleGetProjectOverview } from './tools/get-project-overview.js';
 import { handleCheckSymbols } from './tools/check-symbols.js';
 import { handleRefreshSymbols } from './tools/refresh-symbols.js';
 import { handleBackupPlan } from './tools/backup-plan.js';
+import { handleRequestCompact } from './tools/request-compact.js';
 
 const server = new Server(
   { name: 'wisdom-store', version: '0.3.0' },
@@ -337,6 +338,23 @@ const TOOLS = [
       },
       required: ['plan_name']
     }
+  },
+  {
+    name: 'request_compact',
+    description: 'Request context compaction for your session. Sends /compact to your tmux session via the dashboard — it executes after your current turn completes. Use when context is getting large and you want to compact proactively. Save important findings with save_wisdom first, as compaction summarizes and trims conversation history. Requires DASHBOARD_URL env var.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        conversation_id: {
+          type: 'string',
+          description: 'Conversation UUID. If omitted, auto-detects from the current project.'
+        },
+        session: {
+          type: 'string',
+          description: 'Tmux session name. If omitted, looks up by conversation ID via dashboard.'
+        }
+      }
+    }
   }
 ];
 
@@ -373,6 +391,8 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         return await handleRefreshSymbols(args);
       case 'backup_plan':
         return await handleBackupPlan(args);
+      case 'request_compact':
+        return await handleRequestCompact(args);
       default:
         return {
           content: [{ type: 'text', text: `Unknown tool: ${name}` }],
