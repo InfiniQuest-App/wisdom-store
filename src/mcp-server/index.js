@@ -9,6 +9,23 @@
  * V1d: check_symbols, refresh_symbols
  */
 
+import { readFileSync } from 'fs';
+import { resolve, dirname } from 'path';
+import { fileURLToPath } from 'url';
+
+// Load .env from project root (no dotenv dependency needed)
+const __dirname = dirname(fileURLToPath(import.meta.url));
+const envPath = resolve(__dirname, '../../.env');
+try {
+  const envContent = readFileSync(envPath, 'utf-8');
+  for (const line of envContent.split('\n')) {
+    const match = line.match(/^([^#=]+)=(.*)$/);
+    if (match && !process.env[match[1].trim()]) {
+      process.env[match[1].trim()] = match[2].trim();
+    }
+  }
+} catch {}
+
 import { Server } from '@modelcontextprotocol/sdk/server/index.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
 import {
@@ -29,6 +46,7 @@ import { handleCheckSymbols } from './tools/check-symbols.js';
 import { handleRefreshSymbols } from './tools/refresh-symbols.js';
 import { handleBackupPlan } from './tools/backup-plan.js';
 import { handleRequestCompact } from './tools/request-compact.js';
+import { handleAnnotateWisdom } from './tools/annotate-wisdom.js';
 
 const server = new Server(
   { name: 'wisdom-store', version: '0.3.0' },
@@ -340,6 +358,32 @@ const TOOLS = [
     }
   },
   {
+    name: 'annotate_wisdom',
+    description: 'Add a comment or correction to existing wisdom. Use when you discover a previous assumption was wrong, needs clarification, or has new context. Annotations are timestamped and appended below the matching entry. Think of it as leaving a sticky note for future sessions.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        comment: {
+          type: 'string',
+          description: 'The annotation to add (e.g. "Actually XYZ is wrong because...", "To clarify: you also need to...")'
+        },
+        section: {
+          type: 'string',
+          description: 'Section name to annotate (writes to .wisdom/sections/<name>.md)'
+        },
+        file_path: {
+          type: 'string',
+          description: 'File path whose sidecar to annotate (<file>.wisdom)'
+        },
+        search: {
+          type: 'string',
+          description: 'Text to search for within the wisdom file to place the annotation near. If omitted, appends to end.'
+        }
+      },
+      required: ['comment']
+    }
+  },
+  {
     name: 'request_compact',
     description: 'Request context compaction for your session. Sends /compact to your tmux session via the dashboard — it executes after your current turn completes. Use when context is getting large and you want to compact proactively. Save important findings with save_wisdom first, as compaction summarizes and trims conversation history. Requires DASHBOARD_URL env var.',
     inputSchema: {
@@ -393,6 +437,8 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         return await handleBackupPlan(args);
       case 'request_compact':
         return await handleRequestCompact(args);
+      case 'annotate_wisdom':
+        return await handleAnnotateWisdom(args);
       default:
         return {
           content: [{ type: 'text', text: `Unknown tool: ${name}` }],

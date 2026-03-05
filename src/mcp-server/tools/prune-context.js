@@ -14,6 +14,7 @@
 import {
   findConversationFile,
   readJsonl,
+  readJsonlLine,
   walkChain,
   rewriteLine,
   estimateTokens,
@@ -100,6 +101,22 @@ export async function handlePruneContext(args) {
   let prunedTokens = 0;
   for (let i = 0; i < targetIndex; i++) {
     prunedTokens += estimateTokens(getMessageContent(chain[i]));
+  }
+
+  // For large files, lightweight parsing may not have the full type.
+  // Read the actual target line to get the real type.
+  const fullTarget = readJsonlLine(filePath, targetEntry.line);
+  const targetType = fullTarget?.type || targetEntry.data.type;
+
+  // Ensure the new root isn't an assistant message — Claude Code won't resume if root is assistant.
+  // Walk forward to find a system or user message if needed.
+  if (targetType === 'assistant') {
+    while (targetIndex < chain.length - 1) {
+      targetIndex++;
+      targetEntry = chain[targetIndex];
+      const check = readJsonlLine(filePath, targetEntry.line);
+      if (check?.type !== 'assistant') break;
+    }
   }
 
   // Set parentUuid to null on the target message

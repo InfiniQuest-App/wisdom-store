@@ -131,8 +131,10 @@ function readJsonlLightweight(filePath) {
     let type = null;
     if (line.includes('"type":"user"')) type = 'user';
     else if (line.includes('"type":"assistant"')) type = 'assistant';
+    else if (line.includes('"type":"system"')) type = 'system';
     else if (line.includes('"type":"file-history-snapshot"')) type = 'file-history-snapshot';
     else if (line.includes('"type":"progress"')) type = 'progress';
+    else if (line.includes('"type":"queue-operation"')) type = 'queue-operation';
 
     // Skip non-message lines (like file-history-snapshot without uuid chain fields)
     if (!uuid && type === 'file-history-snapshot') continue;
