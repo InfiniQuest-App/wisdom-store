@@ -45,10 +45,24 @@ export async function handleBackupPlan(args) {
   const backupsDir = path.join(wisdomDir, 'plan-backups');
   fs.mkdirSync(backupsDir, { recursive: true });
 
-  // Filename: planname-YYYY-MM-DD-HHMMSS.md
+  // Extract title from first heading line (e.g. "# Calendar Timeline View")
+  const titleMatch = content.match(/^#\s+(.+)/m);
+  const titleSlug = titleMatch
+    ? titleMatch[1].trim().toLowerCase()
+        .replace(/[^a-z0-9\s-]/g, '')
+        .replace(/\s+/g, '-')
+        .replace(/-{2,}/g, '-')
+        .substring(0, 50)
+        .replace(/^-|-$/g, '')
+    : null;
+
+  // Filename: YYYY-MM-DD-HHMMSS__planname__title-slug.md
+  // Date first (chronological sort), __ separates parts, - within parts
   const now = new Date();
   const ts = now.toISOString().replace(/[T:]/g, '-').replace(/\..+/, '');
-  const destName = `${name}-${ts}.md`;
+  const destName = titleSlug
+    ? `${ts}__${name}__${titleSlug}.md`
+    : `${ts}__${name}.md`;
   const destPath = path.join(backupsDir, destName);
 
   fs.writeFileSync(destPath, content, 'utf8');
