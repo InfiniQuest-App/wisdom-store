@@ -36,6 +36,7 @@ import {
 import { handleContextStatus } from './tools/context-status.js';
 import { handlePruneContext } from './tools/prune-context.js';
 import { handleInjectContext } from './tools/inject-context.js';
+import { handleRestoreContext } from './tools/restore-context.js';
 import { handleSaveWisdom } from './tools/save-wisdom.js';
 import { handleGetWisdom } from './tools/get-wisdom.js';
 import { handleUpdatePlan } from './tools/update-plan.js';
@@ -125,6 +126,19 @@ const TOOLS = [
         }
       },
       required: ['content']
+    }
+  },
+  {
+    name: 'restore_context',
+    description: 'Reverse a compaction — restore the full conversation history that was summarized away. Finds the compact summary, re-links the chain to the original pre-compact messages, and orphans the summary. Works live without restart. Use when you need the full context back after a compact, or when the summary lost important details.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        conversation_id: {
+          type: 'string',
+          description: 'Conversation UUID. If omitted, finds the most recently modified conversation for the current project.'
+        }
+      }
     }
   },
 
@@ -417,6 +431,8 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         return await handlePruneContext(args);
       case 'inject_context':
         return await handleInjectContext(args);
+      case 'restore_context':
+        return await handleRestoreContext(args);
       case 'save_wisdom':
         return await handleSaveWisdom(args);
       case 'get_wisdom':
