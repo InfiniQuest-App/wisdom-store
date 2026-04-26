@@ -126,6 +126,7 @@ export async function handlePruneContext(args) {
   const report = [
     `## Context Pruned`,
     ``,
+    `**File**: \`${filePath}\``,
     `**Mode**: ${args.mode}${args.mode === 'before_message' ? ` (message ${args.message_number})` : args.mode === 'oldest_percent' ? ` (${args.percent}%)` : ` (phrase: "${args.phrase}")`}`,
     `**Messages orphaned**: ${prunedMessages} of ${chain.length}`,
     `**Estimated tokens freed**: ~${prunedTokens.toLocaleString()}`,
