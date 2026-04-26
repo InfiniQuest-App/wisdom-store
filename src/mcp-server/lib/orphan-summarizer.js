@@ -43,17 +43,59 @@ function extractToolUses(msg) {
   return out;
 }
 
-// For a single segment of messages, build a summary
-function summarizeSegment(messages, startIdx) {
+/**
+ * Detect whether a message is a "real user turn" — a human-typed message that
+ * starts a new turn. Tool-result messages are also user-role but aren't real
+ * turns; we ignore them so turn counts reflect actual human prompts.
+ */
+export function isRealUserTurn(msg) {
+  const role = msg?.message?.role || msg?.type;
+  if (role !== 'user') return false;
+  const content = msg?.message?.content;
+  if (typeof content === 'string' && content.trim().length > 0) return true;
+  if (Array.isArray(content)) {
+    // Real turn if any block is a text block (not just tool_results)
+    return content.some(b => b?.type === 'text' && (b.text || '').trim().length > 0);
+  }
+  return false;
+}
+
+/**
+ * Walk messages and assign a turn_id to each based on real-user-turn boundaries.
+ * Returns an array parallel to messages: turnIds[i] = turn id (1-indexed) of messages[i].
+ * Messages before the first real user turn get turn_id 0.
+ */
+export function assignTurnIds(messages) {
+  const turnIds = new Array(messages.length).fill(0);
+  let currentTurn = 0;
+  for (let i = 0; i < messages.length; i++) {
+    if (isRealUserTurn(messages[i])) currentTurn++;
+    turnIds[i] = currentTurn;
+  }
+  return turnIds;
+}
+
+// For a single segment of messages, build a summary.
+// turnIds is parallel to messages — turnIds[i] is the 1-indexed turn id of messages[i].
+function summarizeSegment(messages, startIdx, turnIds) {
   const filesTouched = new Set();
   const toolCounts = {};
   const bashSamples = [];
-  const userDecisions = [];
+  const userDecisions = []; // [{ turn_id, text }]
   const assistantHighlights = [];
   let firstTs = null;
   let lastTs = null;
+  let firstTurn = null;
+  let lastTurn = null;
 
-  for (const m of messages) {
+  for (let i = 0; i < messages.length; i++) {
+    const m = messages[i];
+    const turnId = turnIds[i];
+    if (turnId > 0) {
+      if (firstTurn === null) firstTurn = turnId;
+      lastTurn = turnId;
+    }
+
     const ts = m.timestamp;
     if (ts && !firstTs) firstTs = ts;
     if (ts) lastTs = ts;
@@ -61,9 +103,7 @@ function summarizeSegment(messages, startIdx) {
     // Tool uses
     for (const tu of extractToolUses(m)) {
       toolCounts[tu.name] = (toolCounts[tu.name] || 0) + 1;
-      // Files
       if (tu.input.file_path) filesTouched.add(tu.input.file_path);
-      // Bash samples (first N only, to keep summary tight)
       if (tu.name === 'Bash' && tu.input.command && bashSamples.length < 5) {
         const cmd = String(tu.input.command).split('\n')[0].slice(0, 120);
         const desc = tu.input.description ? ` # ${tu.input.description}` : '';
@@ -72,24 +112,22 @@ function summarizeSegment(messages, startIdx) {
     }
 
     // User decisions / assistant highlights — work from extracted text
-    // getMessageContent expects the {data: ...} wrapper from readJsonl
     const role = m?.message?.role || m?.type;
     const text = (getMessageContent({ data: m }) || '').trim();
     if (!text) continue;
 
     if (role === 'user' && isDecisionLike(text)) {
-      // Take the first line, capped
       const oneLine = text.split('\n')[0].slice(0, 200);
-      if (userDecisions.length < 6) userDecisions.push(oneLine);
+      if (userDecisions.length < 6) userDecisions.push({ turn_id: turnId, text: oneLine });
     } else if (role === 'assistant' && text.length > 80 && assistantHighlights.length < 3) {
-      // First substantive assistant message in segment
       const oneLine = text.split('\n')[0].slice(0, 160);
-      assistantHighlights.push(oneLine);
+      assistantHighlights.push({ turn_id: turnId, text: oneLine });
     }
   }
 
   return {
     msg_range: [startIdx + 1, startIdx + messages.length], // 1-indexed
+    turn_range: firstTurn !== null ? [firstTurn, lastTurn] : null,
     time_range: firstTs && lastTs ? [firstTs, lastTs] : null,
     files_touched: [...filesTouched].slice(0, 15),
     files_touched_count: filesTouched.size,
@@ -109,12 +147,14 @@ function summarizeSegment(messages, startIdx) {
  */
 export function summarizeOrphanedMessages(messages, segmentSize = DEFAULT_SEGMENT_SIZE) {
   if (!Array.isArray(messages) || messages.length === 0) return [];
+  const turnIds = assignTurnIds(messages);
   const segments = [];
   for (let i = 0; i < messages.length; i += segmentSize) {
     const slice = messages.slice(i, Math.min(i + segmentSize, messages.length));
+    const sliceTurnIds = turnIds.slice(i, Math.min(i + segmentSize, messages.length));
     segments.push({
       id: segments.length + 1,
-      ...summarizeSegment(slice, i),
+      ...summarizeSegment(slice, i, sliceTurnIds),
     });
   }
   return segments;
@@ -159,7 +199,11 @@ export function formatSummary(segments, conversationId) {
     ``,
     `### 📜 Pruned content summary (${segments.length} segment${segments.length === 1 ? '' : 's'})`,
     ``,
-    `Use \`inspect_pruned_messages({ conversation_id: "${conversationId}", segment_id: N })\` to view the raw messages for any segment below.`,
+    `Reveal options for any segment or sub-range below:`,
+    `  - Whole segment: \`inspect_pruned_messages({ conversation_id: "${conversationId}", segment_id: N })\``,
+    `  - Single turn:   \`inspect_pruned_messages({ conversation_id: "${conversationId}", turn_id: N })\``,
+    `  - Turn range:    \`inspect_pruned_messages({ conversation_id: "${conversationId}", turn_range: [N, M] })\``,
+    `  - Message range: \`inspect_pruned_messages({ conversation_id: "${conversationId}", message_range: [N, M] })\``,
     ``,
   ];
 
@@ -172,8 +216,11 @@ export function formatSummary(segments, conversationId) {
     const timeStr = seg.time_range
       ? `${seg.time_range[0].slice(0, 16).replace('T', ' ')} → ${seg.time_range[1].slice(0, 16).replace('T', ' ')}`
       : 'unknown time';
+    const turnStr = seg.turn_range
+      ? ` · turns ${seg.turn_range[0]}${seg.turn_range[0] === seg.turn_range[1] ? '' : '–' + seg.turn_range[1]}`
+      : '';
     lines.push(`---`);
-    lines.push(`**Segment ${seg.id}** — msgs ${seg.msg_range[0]}–${seg.msg_range[1]} · ${timeStr}`);
+    lines.push(`**Segment ${seg.id}** — msgs ${seg.msg_range[0]}–${seg.msg_range[1]}${turnStr} · ${timeStr}`);
     if (tools) lines.push(`- Tools: ${tools}`);
     if (seg.files_touched_count > 0) {
       const filesLine = seg.files_touched.length === seg.files_touched_count
@@ -187,11 +234,17 @@ export function formatSummary(segments, conversationId) {
     }
     if (seg.user_decisions.length > 0) {
       lines.push(`- User decisions/instructions:`);
-      for (const d of seg.user_decisions) lines.push(`  - "${d}"`);
+      for (const d of seg.user_decisions) {
+        const turnTag = d.turn_id ? `turn ${d.turn_id}: ` : '';
+        lines.push(`  - ${turnTag}"${d.text}"`);
+      }
     }
     if (seg.assistant_highlights.length > 0) {
       lines.push(`- Assistant highlights:`);
-      for (const h of seg.assistant_highlights) lines.push(`  - "${h}"`);
+      for (const h of seg.assistant_highlights) {
+        const turnTag = h.turn_id ? `turn ${h.turn_id}: ` : '';
+        lines.push(`  - ${turnTag}"${h.text}"`);
+      }
     }
   }
   return lines.join('\n');

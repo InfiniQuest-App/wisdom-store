@@ -400,7 +400,7 @@ const TOOLS = [
   },
   {
     name: 'inspect_pruned_messages',
-    description: 'Reveal raw messages from a section orphaned by prune_context. Companion to prune_context, which returns a structural summary with segment IDs and message ranges — use this tool to drill into any segment you want to read. The orphaned messages are still in the JSONL file (parentUuid:null on the new root just hides them from Claude); this tool reads them back for inspection. Two modes: pass segment_id (1-indexed, matches the IDs in prune_context output) for the standard 200-message-per-segment chunks, OR pass message_range [start, end] for an arbitrary 1-indexed range.',
+    description: 'Reveal raw messages from a section orphaned by prune_context. Companion to prune_context, which returns a structural summary with segment IDs, turn IDs, and message ranges — use this tool to drill into any specific reveal granularity you want. The orphaned messages are still in the JSONL file (parentUuid:null on the new root just hides them from Claude); this tool reads them back for inspection. Four modes by granularity (most narrow to widest): turn_id (single human-prompt turn + its assistant response), turn_range [N,M] (range of turns), message_range [start,end] (arbitrary message indices), segment_id (200-message chunk matching prune_context output). turn_id is usually the most useful for "show me what happened around this specific user instruction".',
     inputSchema: {
       type: 'object',
       properties: {
@@ -408,9 +408,18 @@ const TOOLS = [
           type: 'string',
           description: 'Conversation UUID to inspect. If omitted, finds the most recently modified conversation for the current project.'
         },
+        turn_id: {
+          type: 'integer',
+          description: '1-indexed turn number — returns just that turn (one user message + all assistant responses up to the next user message). Most narrow reveal granularity.'
+        },
+        turn_range: {
+          type: 'array',
+          items: { type: 'integer' },
+          description: 'Explicit [first_turn, last_turn] turn IDs. Returns all messages in that range. Use for inspecting a few related turns.'
+        },
         segment_id: {
           type: 'integer',
-          description: '1-indexed segment number from prune_context output. Maps to messages [(segment_id-1)*200+1, segment_id*200].'
+          description: '1-indexed segment number from prune_context output. Maps to messages [(segment_id-1)*200+1, segment_id*200]. Widest reveal granularity.'
         },
         segment_size: {
           type: 'integer',
@@ -419,7 +428,7 @@ const TOOLS = [
         message_range: {
           type: 'array',
           items: { type: 'integer' },
-          description: 'Explicit [start, end] 1-indexed message numbers (max 100 messages per call). Use instead of segment_id for arbitrary ranges.'
+          description: 'Explicit [start, end] 1-indexed message numbers (max 100 messages per call). Use for arbitrary ranges that don\\'t align with turns or segments.'
         }
       }
     }

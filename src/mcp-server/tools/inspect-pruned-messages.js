@@ -15,6 +15,7 @@
 
 import fs from 'fs';
 import { findConversationFile, getMessageContent } from '../lib/jsonl.js';
+import { assignTurnIds } from '../lib/orphan-summarizer.js';
 
 const DEFAULT_SEGMENT_SIZE = 200;
 const MAX_OUTPUT_MESSAGES = 100; // safety cap
@@ -70,7 +71,11 @@ export async function handleInspectPrunedMessages(args) {
     } catch (_) { /* skip malformed */ }
   }
 
-  // Determine the message range to return
+  // Determine the message range to return. Four modes, in priority order:
+  //   message_range  → explicit [start, end] message indices
+  //   segment_id     → standard 200-message chunks (matches summarizer)
+  //   turn_range     → [N, M] turn IDs → message indices spanning all messages in those turns
+  //   turn_id        → single turn N → message indices for just that turn
   let start, end;
   if (args.message_range && Array.isArray(args.message_range) && args.message_range.length === 2) {
     [start, end] = args.message_range;
@@ -84,9 +89,47 @@ export async function handleInspectPrunedMessages(args) {
     const segSize = args.segment_size || DEFAULT_SEGMENT_SIZE;
     start = (args.segment_id - 1) * segSize + 1;
     end = args.segment_id * segSize;
+  } else if (args.turn_range || args.turn_id) {
+    // Resolve turn IDs to message indices via assignTurnIds across the full message array
+    const rawMessages = messages.map(m => m.data);
+    const turnIds = assignTurnIds(rawMessages);
+    let firstTurn, lastTurn;
+    if (args.turn_range && Array.isArray(args.turn_range) && args.turn_range.length === 2) {
+      [firstTurn, lastTurn] = args.turn_range;
+      if (firstTurn < 1 || lastTurn < firstTurn) {
+        return {
+          content: [{ type: 'text', text: `Invalid turn_range: [${firstTurn}, ${lastTurn}]. Expected [start, end] both >= 1, end >= start.` }],
+          isError: true
+        };
+      }
+    } else {
+      firstTurn = lastTurn = args.turn_id;
+      if (firstTurn < 1) {
+        return {
+          content: [{ type: 'text', text: `Invalid turn_id: ${firstTurn}. Must be >= 1.` }],
+          isError: true
+        };
+      }
+    }
+    // Find first/last message index whose turn falls in [firstTurn, lastTurn]
+    let startIdx = -1, endIdx = -1;
+    for (let i = 0; i < turnIds.length; i++) {
+      if (turnIds[i] >= firstTurn && turnIds[i] <= lastTurn) {
+        if (startIdx === -1) startIdx = i;
+        endIdx = i;
+      }
+    }
+    if (startIdx === -1) {
+      return {
+        content: [{ type: 'text', text: `No messages found for turn${firstTurn === lastTurn ? '' : 's'} ${firstTurn}${firstTurn === lastTurn ? '' : '–' + lastTurn}. Conversation has ${Math.max(...turnIds, 0)} real user turns.` }],
+        isError: true
+      };
+    }
+    start = startIdx + 1; // convert to 1-indexed
+    end = endIdx + 1;
   } else {
     return {
-      content: [{ type: 'text', text: 'Provide either segment_id (1-indexed) or message_range [start, end].' }],
+      content: [{ type: 'text', text: 'Provide one of: segment_id, message_range [start, end], turn_id, or turn_range [start, end].' }],
       isError: true
     };
   }
