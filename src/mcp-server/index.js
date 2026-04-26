@@ -48,6 +48,7 @@ import { handleRefreshSymbols } from './tools/refresh-symbols.js';
 import { handleBackupPlan } from './tools/backup-plan.js';
 import { handleRequestCompact } from './tools/request-compact.js';
 import { handleAnnotateWisdom } from './tools/annotate-wisdom.js';
+import { handleInspectPrunedMessages } from './tools/inspect-pruned-messages.js';
 
 const server = new Server(
   { name: 'wisdom-store', version: '0.3.0' },
@@ -398,6 +399,32 @@ const TOOLS = [
     }
   },
   {
+    name: 'inspect_pruned_messages',
+    description: 'Reveal raw messages from a section orphaned by prune_context. Companion to prune_context, which returns a structural summary with segment IDs and message ranges — use this tool to drill into any segment you want to read. The orphaned messages are still in the JSONL file (parentUuid:null on the new root just hides them from Claude); this tool reads them back for inspection. Two modes: pass segment_id (1-indexed, matches the IDs in prune_context output) for the standard 200-message-per-segment chunks, OR pass message_range [start, end] for an arbitrary 1-indexed range.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        conversation_id: {
+          type: 'string',
+          description: 'Conversation UUID to inspect. If omitted, finds the most recently modified conversation for the current project.'
+        },
+        segment_id: {
+          type: 'integer',
+          description: '1-indexed segment number from prune_context output. Maps to messages [(segment_id-1)*200+1, segment_id*200].'
+        },
+        segment_size: {
+          type: 'integer',
+          description: 'Override default segment size (200) — only meaningful with segment_id. Match what prune_context used.'
+        },
+        message_range: {
+          type: 'array',
+          items: { type: 'integer' },
+          description: 'Explicit [start, end] 1-indexed message numbers (max 100 messages per call). Use instead of segment_id for arbitrary ranges.'
+        }
+      }
+    }
+  },
+  {
     name: 'request_compact',
     description: 'Request context compaction for your session. Sends /compact to your tmux session via the dashboard — it executes after your current turn completes. Use when context is getting large and you want to compact proactively. Save important findings with save_wisdom first, as compaction summarizes and trims conversation history. Requires DASHBOARD_URL env var.',
     inputSchema: {
@@ -455,6 +482,8 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         return await handleRequestCompact(args);
       case 'annotate_wisdom':
         return await handleAnnotateWisdom(args);
+      case 'inspect_pruned_messages':
+        return await handleInspectPrunedMessages(args);
       default:
         return {
           content: [{ type: 'text', text: `Unknown tool: ${name}` }],

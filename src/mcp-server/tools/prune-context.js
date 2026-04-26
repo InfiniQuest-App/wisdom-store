@@ -20,6 +20,7 @@ import {
   estimateTokens,
   getMessageContent
 } from '../lib/jsonl.js';
+import { summarizeOrphanedFromFile, formatSummary } from '../lib/orphan-summarizer.js';
 
 export async function handlePruneContext(args) {
   const filePath = findConversationFile(args.conversation_id);
@@ -119,6 +120,22 @@ export async function handlePruneContext(args) {
     }
   }
 
+  // Summarize the about-to-be-orphaned messages BEFORE we rewrite parentUuid.
+  // The chain[0..targetIndex-1] slice is the section we're cutting off — we walk it
+  // through the heuristic summarizer to produce a structured, segmented digest the
+  // caller can use to (a) understand at-a-glance what was lost and (b) progressively
+  // reveal specific segments via inspect_pruned_messages if needed.
+  // Use the file-aware variant: chain entries are lightweight for files >50MB, so we
+  // re-read the relevant lines from disk to get full message bodies.
+  let summary = '';
+  try {
+    const orphanedLineIndices = chain.slice(0, targetIndex).map(c => c.line);
+    const orphanedSummary = summarizeOrphanedFromFile(filePath, orphanedLineIndices);
+    summary = formatSummary(orphanedSummary, args.conversation_id || '<conversation_id>');
+  } catch (e) {
+    summary = `\n(Summary generation failed: ${e.message})`;
+  }
+
   // Set parentUuid to null on the target message
   const newData = { ...targetEntry.data, parentUuid: null };
   rewriteLine(filePath, targetEntry.line, newData);
@@ -134,6 +151,7 @@ export async function handlePruneContext(args) {
     ``,
     `The pruned messages are orphaned but still in the file.`,
     `Context change takes effect on the next message (no restart needed).`,
+    summary,
   ].join('\n');
 
   return {
