@@ -36,14 +36,25 @@ export function findConversationFile(conversationId, cwd) {
     const filePath = path.join(dir, `${conversationId}.jsonl`);
     if (fs.existsSync(filePath)) return filePath;
 
-    // Quick scan of other project dirs (just check existence, no listing)
+    // Scan all OTHER project dirs. Collect every match and return the most-recently-modified
+    // one — duplicates can exist when Claude Code's folder-naming has changed historically
+    // (e.g. _ → -) or after archive restore creates files in stale dirs while live workers
+    // write to the normalized one. Picking by readdir-order is non-deterministic and can
+    // silently return the stale copy.
     try {
       const dirs = fs.readdirSync(PROJECTS_DIR);
+      const matches = [];
       for (const d of dirs) {
-        if (d === hash) continue; // Already checked
+        if (d === hash) continue; // Already checked above (would have returned)
         const candidate = path.join(PROJECTS_DIR, d, `${conversationId}.jsonl`);
-        if (fs.existsSync(candidate)) return candidate;
+        try {
+          const st = fs.statSync(candidate);
+          matches.push({ path: candidate, mtime: st.mtimeMs });
+        } catch { /* not in this folder */ }
       }
+      if (matches.length === 0) return null;
+      matches.sort((a, b) => b.mtime - a.mtime); // newest first
+      return matches[0].path;
     } catch { /* ignore */ }
     return null;
   }
@@ -262,9 +273,19 @@ export function getMessageContent(entry) {
 
 /**
  * Rewrite a specific line in the JSONL file.
- * Reads the file, modifies the target line, writes back.
+ *
+ * Two safety properties added on top of read-modify-write:
+ *   1) Race guard against a live writer (Claude Code appending mid-edit). We capture the
+ *      file size before reading and re-stat just before write; if size grew, we abort with
+ *      a clear error rather than silently overwriting the worker's appended messages.
+ *   2) Atomic on-disk swap via tmp + rename, so a process kill / power loss can't leave a
+ *      truncated half-written JSONL that breaks Claude Code's chain walking.
+ *
+ * Throws on race or write failure — callers should let it propagate so the user sees it
+ * (vs. data loss being silent).
  */
 export function rewriteLine(filePath, lineIndex, newData) {
+  const sizeBefore = fs.statSync(filePath).size;
   const content = fs.readFileSync(filePath, 'utf8');
   const lines = content.split('\n');
 
@@ -282,7 +303,30 @@ export function rewriteLine(filePath, lineIndex, newData) {
   }
 
   lines[actualIndex] = JSON.stringify(newData);
-  fs.writeFileSync(filePath, lines.join('\n'));
+  const newContent = lines.join('\n');
+
+  // Race guard: if the file grew while we were preparing the modification, a live writer
+  // (likely Claude Code appending a new message) just added bytes we'd silently clobber.
+  // Refuse rather than lose data.
+  const sizeNow = fs.statSync(filePath).size;
+  if (sizeNow !== sizeBefore) {
+    throw new Error(
+      `prune_context: file ${filePath} was modified concurrently ` +
+      `(size ${sizeBefore} → ${sizeNow}). ` +
+      `Aborting to avoid overwriting the writer's appended data. Retry the prune.`
+    );
+  }
+
+  // Atomic write: tmp file in same dir + rename. Same-dir is required for rename atomicity
+  // on most filesystems (cross-fs renames degrade to copy+delete, which isn't atomic).
+  const tmpPath = filePath + '.tmp-' + process.pid + '-' + Date.now();
+  fs.writeFileSync(tmpPath, newContent);
+  try {
+    fs.renameSync(tmpPath, filePath);
+  } catch (e) {
+    try { fs.unlinkSync(tmpPath); } catch (_) {}
+    throw e;
+  }
 }
 
 /**
