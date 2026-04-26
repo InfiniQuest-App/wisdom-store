@@ -400,7 +400,7 @@ const TOOLS = [
   },
   {
     name: 'inspect_pruned_messages',
-    description: 'Reveal raw messages from a section orphaned by prune_context. Companion to prune_context, which returns a structural summary with segment IDs, turn IDs, and message ranges — use this tool to drill into any specific reveal granularity you want. The orphaned messages are still in the JSONL file (parentUuid:null on the new root just hides them from Claude); this tool reads them back for inspection. Four modes by granularity (most narrow to widest): turn_id (single human-prompt turn + its assistant response), turn_range [N,M] (range of turns), message_range [start,end] (arbitrary message indices), segment_id (200-message chunk matching prune_context output). turn_id is usually the most useful for "show me what happened around this specific user instruction".',
+    description: 'Reveal content from a section orphaned by prune_context, with nested progressive disclosure. The orphaned messages are still in the JSONL file (parentUuid:null on the new root just hides them from Claude); this tool reads them back. Five modes from narrowest-and-cheapest to widest:\n\n  1. turn_id: N (no other args) → lightweight TURN SUMMARY: user prompt + numbered action list (each tool call with key params + final assistant text). Default turn_id behavior, designed for "what happened in this turn?" without loading 30 raw messages.\n  2. turn_id: N, action_id: M → drill into one specific action\'s raw message.\n  3. turn_id: N, action_range: [M, K] → range of actions within the turn.\n  4. turn_id: N, full: true → all raw messages in turn (heavy; use only when you really need it).\n  5. turn_range: [N, M] → all messages across multiple turns.\n  6. message_range: [start, end] → arbitrary 1-indexed message range (max 100).\n  7. segment_id: N → 200-message chunk matching prune_context output IDs.\n\nRecommended workflow: prune_context output gives you turn IDs and action counts. Use turn_id alone for the summary, then action_id/action_range to drill in.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -410,12 +410,26 @@ const TOOLS = [
         },
         turn_id: {
           type: 'integer',
-          description: '1-indexed turn number — returns just that turn (one user message + all assistant responses up to the next user message). Most narrow reveal granularity.'
+          description: '1-indexed turn number. By default returns a lightweight turn summary (user prompt + numbered action list). Combine with action_id, action_range, or full for different reveal granularities.'
+        },
+        action_id: {
+          type: 'integer',
+          description: '1-indexed action within the turn (only with turn_id). Returns the raw message containing that specific tool_use or assistant text.'
+        },
+        action_range: {
+          type: 'array',
+          items: { type: 'integer' },
+          description: '[first_action, last_action] within the turn (only with turn_id). Returns the raw message range spanning those actions.'
+        },
+        full: {
+          type: 'boolean',
+          description: 'When true with turn_id, returns ALL raw messages in the turn (heavy — typically prefer the default summary or action_id/action_range drill-in).',
+          default: false
         },
         turn_range: {
           type: 'array',
           items: { type: 'integer' },
-          description: 'Explicit [first_turn, last_turn] turn IDs. Returns all messages in that range. Use for inspecting a few related turns.'
+          description: '[first_turn, last_turn]. Returns all messages across that turn range. Use for inspecting a few related turns at once.'
         },
         segment_id: {
           type: 'integer',
@@ -428,7 +442,7 @@ const TOOLS = [
         message_range: {
           type: 'array',
           items: { type: 'integer' },
-          description: 'Explicit [start, end] 1-indexed message numbers (max 100 messages per call). Use for arbitrary ranges that don\\'t align with turns or segments.'
+          description: 'Explicit [start, end] 1-indexed message numbers (max 100 per call). Use for arbitrary ranges that don\\'t align with turns or segments.'
         }
       }
     }

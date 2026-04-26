@@ -161,6 +161,179 @@ export function summarizeOrphanedMessages(messages, segmentSize = DEFAULT_SEGMEN
 }
 
 /**
+ * Summarize a single turn (one human prompt + all assistant responses up to the
+ * next human prompt) into a lightweight numbered action list. Designed for nested
+ * progressive reveal: orchestrator gets a turn summary cheap, then drills into
+ * any single action_id for the full content.
+ *
+ * Returns { user_prompt, actions[], final_text, message_count } where actions[]
+ * is 1-indexed and each entry has { action_id, type, summary, msg_index }.
+ *
+ * @param {Array} messages - Full message array for the conversation
+ * @param {number[]} turnIds - Parallel turn ids from assignTurnIds
+ * @param {number} targetTurn - 1-indexed turn to summarize
+ */
+export function summarizeTurn(messages, turnIds, targetTurn) {
+  const turnMsgs = [];
+  const turnMsgIndices = []; // 0-indexed within full messages array
+  for (let i = 0; i < messages.length; i++) {
+    if (turnIds[i] === targetTurn) {
+      turnMsgs.push(messages[i]);
+      turnMsgIndices.push(i);
+    }
+  }
+  if (turnMsgs.length === 0) return null;
+
+  // The user prompt is the first message in the turn (the "real user turn" message)
+  let userPrompt = '';
+  const firstMsg = turnMsgs[0];
+  if (isRealUserTurn(firstMsg)) {
+    const text = (getMessageContent({ data: firstMsg }) || '').trim();
+    // Cap user prompt at ~500 chars; full content available via action_id: 1
+    userPrompt = text.length > 500 ? text.slice(0, 500) + '… (truncated; use action_id: 1 for full)' : text;
+  }
+
+  // Each subsequent message becomes a numbered action. Tool-result-bearing user
+  // messages are folded into the preceding tool_use action (we surface them as
+  // "result" notes rather than separate steps).
+  const actions = [];
+  let finalText = '';
+
+  for (let i = 1; i < turnMsgs.length; i++) {
+    const m = turnMsgs[i];
+    const role = m?.message?.role || m?.type;
+    const content = m?.message?.content;
+    const msgIdx = turnMsgIndices[i] + 1; // 1-indexed within full conversation
+
+    if (role === 'assistant' && Array.isArray(content)) {
+      for (const block of content) {
+        if (block?.type === 'tool_use') {
+          const summary = formatToolUseSummary(block);
+          actions.push({
+            action_id: actions.length + 1,
+            type: 'tool_use',
+            tool: block.name,
+            summary,
+            msg_index: msgIdx,
+          });
+        } else if (block?.type === 'text' && (block.text || '').trim().length > 0) {
+          // Assistant text. Could be intermediate commentary OR the final response.
+          // We treat the last-text-block-of-the-turn as final_text; intermediates
+          // become actions too.
+          actions.push({
+            action_id: actions.length + 1,
+            type: 'assistant_text',
+            summary: block.text.split('\n')[0].slice(0, 200) + (block.text.length > 200 ? '…' : ''),
+            msg_index: msgIdx,
+          });
+          finalText = block.text; // last one wins
+        }
+      }
+    } else if (role === 'user' && Array.isArray(content)) {
+      // Tool results — annotate the preceding tool_use action with brief outcome
+      const lastAction = actions[actions.length - 1];
+      for (const block of content) {
+        if (block?.type === 'tool_result' && lastAction && !lastAction.result_summary) {
+          const rc = typeof block.content === 'string'
+            ? block.content
+            : Array.isArray(block.content)
+              ? block.content.filter(b => b.type === 'text').map(b => b.text).join('\n')
+              : '';
+          const oneLine = rc.split('\n').filter(l => l.trim())[0] || '';
+          if (oneLine) lastAction.result_summary = oneLine.slice(0, 120);
+          if (block.is_error) lastAction.result_error = true;
+        }
+      }
+    }
+  }
+
+  return {
+    turn_id: targetTurn,
+    message_count: turnMsgs.length,
+    msg_range: [turnMsgIndices[0] + 1, turnMsgIndices[turnMsgIndices.length - 1] + 1],
+    user_prompt: userPrompt,
+    actions,
+    final_text: finalText && finalText !== (actions[actions.length - 1]?.summary || '')
+      ? (finalText.length > 800 ? finalText.slice(0, 800) + '…' : finalText)
+      : '',
+  };
+}
+
+/**
+ * Format a turn summary object into a markdown text block. Lightweight enough
+ * to embed in an inspect_pruned_messages response without bloating the caller's
+ * context — designed to give the orchestrator/operator enough signal to decide
+ * which action_id to drill into.
+ */
+export function formatTurnSummary(turnSummary, conversationId) {
+  if (!turnSummary) return '';
+  const cid = conversationId || '<conversation_id>';
+  const lines = [
+    `## Turn ${turnSummary.turn_id} summary (${turnSummary.message_count} messages, msgs ${turnSummary.msg_range[0]}–${turnSummary.msg_range[1]})`,
+    ``,
+    `**User said:**`,
+    turnSummary.user_prompt ? `> ${turnSummary.user_prompt.split('\n').join('\n> ')}` : `> (no user prompt found)`,
+    ``,
+    `**Claude's actions (${turnSummary.actions.length}):**`,
+  ];
+  for (const a of turnSummary.actions) {
+    if (a.type === 'tool_use') {
+      const errMark = a.result_error ? ' ⚠️' : '';
+      const resultLine = a.result_summary ? `\n      ↳ ${a.result_summary}${errMark}` : '';
+      lines.push(`  ${a.action_id}. 🔧 ${a.tool}: ${a.summary}${resultLine}`);
+    } else {
+      lines.push(`  ${a.action_id}. 💬 ${a.summary}`);
+    }
+  }
+  if (turnSummary.final_text) {
+    lines.push(``);
+    lines.push(`**Final response:**`);
+    lines.push(`> ${turnSummary.final_text.split('\n').slice(0, 6).join('\n> ')}${turnSummary.final_text.split('\n').length > 6 ? '\n> …' : ''}`);
+  }
+  lines.push(``);
+  lines.push(`**Drill in:**`);
+  lines.push(`  - Single action: \`inspect_pruned_messages({ conversation_id: "${cid}", turn_id: ${turnSummary.turn_id}, action_id: N })\``);
+  lines.push(`  - Action range: \`inspect_pruned_messages({ conversation_id: "${cid}", turn_id: ${turnSummary.turn_id}, action_range: [N, M] })\``);
+  lines.push(`  - All raw messages in turn: \`inspect_pruned_messages({ conversation_id: "${cid}", turn_id: ${turnSummary.turn_id}, full: true })\``);
+  return lines.join('\n');
+}
+
+function formatToolUseSummary(block) {
+  const input = block.input || {};
+  const name = block.name || 'unknown';
+  // Per-tool concise summarization
+  if (name === 'Edit' || name === 'Write' || name === 'mcp__codegen__manualFileEdit' || name === 'mcp__codegen__manualFileWrite') {
+    return `${input.file_path || '(no path)'}`;
+  }
+  if (name === 'Read') {
+    const range = input.offset ? ` (offset ${input.offset}, limit ${input.limit || '?'})` : '';
+    return `${input.file_path || '(no path)'}${range}`;
+  }
+  if (name === 'Bash') {
+    const cmd = String(input.command || '').split('\n')[0].slice(0, 100);
+    const desc = input.description ? ` # ${input.description}` : '';
+    return `${cmd}${desc}`;
+  }
+  if (name === 'Grep') {
+    return `pattern="${input.pattern || ''}" path=${input.path || '.'}`;
+  }
+  if (name === 'Glob') {
+    return `pattern="${input.pattern || ''}"`;
+  }
+  if (name === 'Agent') {
+    return `${input.subagent_type || 'general-purpose'}: ${(input.description || '').slice(0, 60)}`;
+  }
+  // Generic MCP tool — show keys + abbreviated values
+  const keys = Object.keys(input).slice(0, 3);
+  const sample = keys.map(k => {
+    const v = input[k];
+    const s = typeof v === 'string' ? v : JSON.stringify(v);
+    return `${k}=${s.slice(0, 40)}${s.length > 40 ? '…' : ''}`;
+  }).join(', ');
+  return sample || '(no args)';
+}
+
+/**
  * Convenience: load full message bodies for a set of line indices in a JSONL file,
  * then summarize. Handles the large-file case where walkChain returned lightweight
  * entries that don't include the message body.
