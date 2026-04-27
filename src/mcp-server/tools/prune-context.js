@@ -109,14 +109,20 @@ export async function handlePruneContext(args) {
   const fullTarget = readJsonlLine(filePath, targetEntry.line);
   const targetType = fullTarget?.type || targetEntry.data.type;
 
-  // Ensure the new root isn't an assistant message — Claude Code won't resume if root is assistant.
-  // Walk forward to find a system or user message if needed.
-  if (targetType === 'assistant') {
+  // Ensure the new root is a 'user' or 'system' message — Claude Code won't resume
+  // if the root is an assistant message OR has missing/unexpected type. Walk forward
+  // until we find a valid user/system entry.
+  let validatedType = targetType;
+  if (validatedType !== 'user' && validatedType !== 'system') {
     while (targetIndex < chain.length - 1) {
       targetIndex++;
       targetEntry = chain[targetIndex];
       const check = readJsonlLine(filePath, targetEntry.line);
-      if (check?.type !== 'assistant') break;
+      const t = check?.type;
+      if (t === 'user' || t === 'system') {
+        validatedType = t;
+        break;
+      }
     }
   }
 
@@ -136,8 +142,13 @@ export async function handlePruneContext(args) {
     summary = `\n(Summary generation failed: ${e.message})`;
   }
 
-  // Set parentUuid to null on the target message
-  const newData = { ...targetEntry.data, parentUuid: null };
+  // Set parentUuid to null on the target message.
+  // CRITICAL: re-read the full line from disk before rewriting. For files >50MB,
+  // walkChain uses lightweight parsing which only extracts chain-walk fields
+  // (uuid, parentUuid, type, timestamp). Spreading that subset and writing it back
+  // would destroy the actual message body, role, and all other content.
+  const fullForRewrite = readJsonlLine(filePath, targetEntry.line) || targetEntry.data;
+  const newData = { ...fullForRewrite, parentUuid: null };
   rewriteLine(filePath, targetEntry.line, newData);
 
   const report = [
@@ -147,7 +158,7 @@ export async function handlePruneContext(args) {
     `**Mode**: ${args.mode}${args.mode === 'before_message' ? ` (message ${args.message_number})` : args.mode === 'oldest_percent' ? ` (${args.percent}%)` : ` (phrase: "${args.phrase}")`}`,
     `**Messages orphaned**: ${prunedMessages} of ${chain.length}`,
     `**Estimated tokens freed**: ~${prunedTokens.toLocaleString()}`,
-    `**New chain root**: message ${targetIndex + 1} (${targetEntry.data.type})`,
+    `**New chain root**: message ${targetIndex + 1} (${validatedType || targetEntry.data.type || 'unknown'})`,
     ``,
     `The pruned messages are orphaned but still in the file.`,
     `Context change takes effect on the next message (no restart needed).`,
