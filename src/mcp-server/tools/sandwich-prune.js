@@ -23,6 +23,13 @@
  *
  * Pairs with `inspect_pruned_messages` (when `remove_middle_orphans: false`)
  * for progressive disclosure of the dropped middle from the live file.
+ *
+ * Determinism note: when the JSONL has multiple leaves (from prior prunes,
+ * branches, or sidechains), `walkChain` picks the leaf with the latest
+ * `timestamp`. So "the active chain" is always the most-recently-written
+ * branch — this tool inherits that rule and operates on whichever chain
+ * `walkChain` selects. If you need to prune a non-latest branch, you'll
+ * need to manipulate the chain selection upstream first.
  */
 
 import { randomUUID } from 'crypto';
@@ -247,6 +254,11 @@ export async function handleSandwichPrune(args = {}) {
   // Race guard: a live writer (Claude Code appending) could have grown the file
   // since we opened it. Refuse rather than clobber appended messages. (Backup
   // already written but is harmless — caller can retry.)
+  //
+  // Pattern (size-based race guard + atomic tmp+rename) mirrors prune_context.js
+  // and lib/jsonl.js's rewriteLine — if you fix one, fix all.
+  // TODO: extract a shared rewriteJsonl({drop, replace, append}) utility so
+  // these tools (and any future ones) share one tested implementation.
   const sizeNow = fs.statSync(filePath).size;
   if (sizeNow !== sizeBefore) {
     throw new Error(

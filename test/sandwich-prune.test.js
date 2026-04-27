@@ -331,6 +331,18 @@ test('rejects keep_first_n < 1', async () => {
   assert.match(result.content[0].text, /must each be >= 1/);
 });
 
+test('rejects keep_recent_n < 1', async () => {
+  cleanupTestDir();
+  const { conversationId } = buildConversation({ count: 50 });
+  const result = await handleSandwichPrune({
+    conversation_id: conversationId,
+    keep_first_n: 5,
+    keep_recent_n: 0
+  });
+  assert.equal(result.isError, true);
+  assert.match(result.content[0].text, /must each be >= 1/);
+});
+
 test('preserves session-level config (file-history-snapshot) entries', async () => {
   cleanupTestDir();
   const { filePath, conversationId } = buildConversation({ count: 30 });
