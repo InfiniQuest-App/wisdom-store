@@ -347,3 +347,118 @@ test('preserves session-level config (file-history-snapshot) entries', async () 
   const afterSnapCount = (after.match(/"type":"file-history-snapshot"/g) || []).length;
   assert.equal(afterSnapCount, beforeSnapCount, 'session-level config should be preserved');
 });
+
+test('writes a timestamped backup file containing dropped middle entries in chain order', async () => {
+  cleanupTestDir();
+  const { filePath, conversationId, entries } = buildConversation({ count: 30 });
+  const result = await handleSandwichPrune({
+    conversation_id: conversationId,
+    keep_first_n: 5,
+    keep_recent_n: 10
+  });
+  assert.equal(result.isError, undefined);
+
+  // Find the backup file alongside the conversation
+  const dir = path.dirname(filePath);
+  const base = path.basename(filePath);
+  const backups = fs.readdirSync(dir).filter(f =>
+    f.startsWith(base + '.middle-backup-') && f.endsWith('.jsonl')
+  );
+  assert.equal(backups.length, 1, `expected exactly 1 backup, got ${backups.length}`);
+  const backupPath = path.join(dir, backups[0]);
+
+  // Filename has unix timestamp
+  assert.match(backups[0], /\.middle-backup-\d+(-\d+)?\.jsonl$/);
+
+  // Backup is valid JSONL containing exactly the 15 middle entries (idx 5..19) in chain order
+  const backupContent = fs.readFileSync(backupPath, 'utf8');
+  const backupLines = backupContent.split('\n').filter(l => l.trim());
+  assert.equal(backupLines.length, 15, `expected 15 backup entries, got ${backupLines.length}`);
+  for (let i = 0; i < 15; i++) {
+    const obj = JSON.parse(backupLines[i]);
+    assert.equal(obj.uuid, entries[5 + i].uuid, `backup entry ${i} should match entries[${5 + i}]`);
+    // Full content should be present (regression: lightweight subset would have wiped it)
+    assert.ok(obj.message?.content?.includes(`MSG_${5 + i}_CONTENT_`), `backup entry ${i} content preserved`);
+  }
+
+  // Report mentions the backup
+  assert.match(result.content[0].text, /Middle backup/);
+  assert.match(result.content[0].text, /\.middle-backup-/);
+});
+
+test('default bridge message leads with backup filename + count + timestamp range', async () => {
+  cleanupTestDir();
+  const { filePath, conversationId } = buildConversation({ count: 30 });
+  await handleSandwichPrune({
+    conversation_id: conversationId,
+    keep_first_n: 5,
+    keep_recent_n: 10
+  });
+
+  // Find bridge in chain
+  const after = readJsonl(filePath);
+  const chain = walkChain(after);
+  const bridgeChainEntry = chain.find(c => {
+    const full = readJsonlLine(filePath, c.line);
+    return full?._sandwichPruneBridge === true;
+  });
+  assert.ok(bridgeChainEntry, 'bridge should be present');
+  const bridge = readJsonlLine(filePath, bridgeChainEntry.line);
+
+  // Default message format: filename leads, count and timestamp range, path as hint
+  const msg = bridge.message.content;
+  assert.match(msg, /Pruned segment: 15 messages/);
+  assert.match(msg, /Backup file: .+\.middle-backup-\d+(-\d+)?\.jsonl/);
+  assert.match(msg, /Located at:/);
+  assert.match(msg, /path may have moved/);
+  // Contains a YYYY-MM-DD HH:MM timestamp
+  assert.match(msg, /\d{4}-\d{2}-\d{2} \d{2}:\d{2}/);
+  // Bridge entry also has _backupFile / _backupPath metadata for programmatic access
+  assert.ok(bridge._backupFile, '_backupFile metadata');
+  assert.ok(bridge._backupPath, '_backupPath metadata');
+});
+
+test('caller-provided bridge_message is used verbatim', async () => {
+  cleanupTestDir();
+  const { filePath, conversationId } = buildConversation({ count: 30 });
+  const customMsg = '[CUSTOM-OVERRIDE bridge text]';
+  await handleSandwichPrune({
+    conversation_id: conversationId,
+    keep_first_n: 5,
+    keep_recent_n: 10,
+    bridge_message: customMsg
+  });
+  const after = readJsonl(filePath);
+  const chain = walkChain(after);
+  const bridgeEntry = chain.find(c => {
+    const full = readJsonlLine(filePath, c.line);
+    return full?._sandwichPruneBridge === true;
+  });
+  const bridge = readJsonlLine(filePath, bridgeEntry.line);
+  assert.equal(bridge.message.content, customMsg);
+});
+
+test('two prunes on the same conversation create two distinct backup files', async () => {
+  cleanupTestDir();
+  const { filePath, conversationId } = buildConversation({ count: 60 });
+
+  await handleSandwichPrune({
+    conversation_id: conversationId,
+    keep_first_n: 5,
+    keep_recent_n: 10
+  });
+  // Second prune on the now-shorter chain
+  const r2 = await handleSandwichPrune({
+    conversation_id: conversationId,
+    keep_first_n: 3,
+    keep_recent_n: 5
+  });
+  assert.equal(r2.isError, undefined, r2.content[0].text);
+
+  const dir = path.dirname(filePath);
+  const base = path.basename(filePath);
+  const backups = fs.readdirSync(dir).filter(f =>
+    f.startsWith(base + '.middle-backup-') && f.endsWith('.jsonl')
+  );
+  assert.equal(backups.length, 2, `expected 2 distinct backups, got ${backups.length}: ${backups.join(', ')}`);
+});
