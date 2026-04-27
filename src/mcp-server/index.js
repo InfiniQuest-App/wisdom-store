@@ -49,6 +49,7 @@ import { handleBackupPlan } from './tools/backup-plan.js';
 import { handleRequestCompact } from './tools/request-compact.js';
 import { handleAnnotateWisdom } from './tools/annotate-wisdom.js';
 import { handleInspectPrunedMessages } from './tools/inspect-pruned-messages.js';
+import { handleSandwichPrune } from './tools/sandwich-prune.js';
 
 const server = new Server(
   { name: 'wisdom-store', version: '0.3.0' },
@@ -100,6 +101,43 @@ const TOOLS = [
         }
       },
       required: ['mode']
+    }
+  },
+  {
+    name: 'sandwich_prune',
+    description: 'Surgical prune that preserves BOTH the start AND end of a conversation, dropping the middle bloat. Use when context is large but the original task brief (top) AND recent working state (bottom) both matter — better than prune_context(oldest_percent) for long-running sessions. Re-links the chain via parentUuid rewrite, optionally inserts a system bridge placeholder at the splice point. Pair with inspect_pruned_messages (when remove_middle_orphans:false) to view dropped content.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        conversation_id: {
+          type: 'string',
+          description: 'Conversation UUID. If omitted, finds the most recently modified conversation for the current project.'
+        },
+        keep_first_n: {
+          type: 'integer',
+          description: 'Number of chain messages to preserve at the START (the original task brief + early context). Default: 5. Must be >= 1.',
+          default: 5
+        },
+        keep_recent_n: {
+          type: 'integer',
+          description: 'Number of chain messages to preserve at the END (the recent working state). Default: 50. Must be >= 1.',
+          default: 50
+        },
+        insert_bridge_placeholder: {
+          type: 'boolean',
+          description: 'If true, inserts a system message at the splice point indicating content was pruned. Default: true.',
+          default: true
+        },
+        bridge_message: {
+          type: 'string',
+          description: 'Custom text for the bridge placeholder. Default explains that content was pruned and points at the JSONL backup.'
+        },
+        remove_middle_orphans: {
+          type: 'boolean',
+          description: 'If true, physically remove orphaned middle entries from the file (frees disk + breaks inspect_pruned_messages on the dropped range). If false, orphans remain on disk for later inspection. Default: true.',
+          default: true
+        }
+      }
     }
   },
   {
@@ -507,6 +545,8 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         return await handleAnnotateWisdom(args);
       case 'inspect_pruned_messages':
         return await handleInspectPrunedMessages(args);
+      case 'sandwich_prune':
+        return await handleSandwichPrune(args);
       default:
         return {
           content: [{ type: 'text', text: `Unknown tool: ${name}` }],
