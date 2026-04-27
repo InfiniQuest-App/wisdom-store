@@ -442,7 +442,7 @@ const TOOLS = [
         message_range: {
           type: 'array',
           items: { type: 'integer' },
-          description: 'Explicit [start, end] 1-indexed message numbers (max 100 per call). Use for arbitrary ranges that don\\'t align with turns or segments.'
+          description: 'Explicit [start, end] 1-indexed message numbers (max 100 per call). Use for arbitrary ranges that don\'t align with turns or segments.'
         }
       }
     }
