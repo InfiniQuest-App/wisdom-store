@@ -498,6 +498,11 @@ const TOOLS = [
         session: {
           type: 'string',
           description: 'Tmux session name. If omitted, looks up by conversation ID via dashboard.'
+        },
+        bypass_wisdom_save: {
+          type: 'boolean',
+          description: 'Skip the PreCompact wisdom-save check. Default false — the dashboard\'s PreCompact hook will block compaction unless wisdom is saved first OR this is true. Use only after verifying nothing important needs saving.',
+          default: false
         }
       }
     }

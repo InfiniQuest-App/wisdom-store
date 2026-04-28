@@ -46,7 +46,8 @@ export async function handleCompactContext(args) {
         conversationId: convId,
         session: args.session,
         delay: args.delay,
-        nudge: args.nudge
+        nudge: args.nudge,
+        bypassWisdomSave: args.bypass_wisdom_save === true
       })
     });
     const result = await resp.json();
@@ -55,12 +56,16 @@ export async function handleCompactContext(args) {
       return {
         content: [{ type: 'text', text: `Compact requested for session \`${result.session}\`. The /compact command will execute after your current turn completes, followed by a nudge to continue. Save any important findings with save_wisdom before the compaction runs.` }]
       };
-    } else {
-      return {
-        content: [{ type: 'text', text: `Failed to send /compact: ${result.error}` }],
-        isError: true
-      };
     }
+
+    // Dashboard returned success:false. Surface whatever signal it gave us
+    // (blocked + advice from PreCompact hook, or generic .error, or just the body).
+    const reason = result.reason || result.error || (result.blocked ? 'blocked by hook' : 'unknown');
+    const advice = result.advice ? `\n\n${result.advice}` : '';
+    return {
+      content: [{ type: 'text', text: `Compact NOT sent (reason: ${reason}).${advice}` }],
+      isError: true
+    };
   } catch (e) {
     return {
       content: [{ type: 'text', text: `Dashboard unreachable: ${e.message}. Run /compact manually.` }],
