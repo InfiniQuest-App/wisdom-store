@@ -24,6 +24,43 @@ export function projectHash(cwd) {
 }
 
 /**
+ * Find the conversation ID belonging to the calling Claude session.
+ *
+ * The MCP server is spawned as a child of the Claude Code CLI process. That parent
+ * process is invoked with `claude --resume <UUID> --ide` (always — orchestrator-
+ * spawned workers and dashboard-restarted sessions both use --resume). So the
+ * authoritative convId for "the session calling me" is the --resume UUID on the
+ * parent's cmdline. Reading /proc/<ppid>/cmdline returns it directly.
+ *
+ * Why this matters: findConversationFile()'s "most recently modified JSONL in
+ * the project dir" fallback is ambiguous when multiple workers share a project
+ * directory — any of them writing flips "most recent" to that worker's file,
+ * silently routing slash-command sends to the wrong session (loop146 bug:
+ * /add-dir from loop146 routed to loop11 because loop11 had written more
+ * recently in the shared Computers_Plus_Repair project).
+ *
+ * Returns the UUID string, or null if the parent's cmdline lacks --resume
+ * (fresh-spawn case — caller should fail loudly rather than guess).
+ */
+export function findCallerConvIdFromParent() {
+  try {
+    const ppid = process.ppid;
+    if (!ppid) return null;
+    const cmdline = fs.readFileSync(`/proc/${ppid}/cmdline`, 'utf8');
+    const argv = cmdline.split('\0').filter(Boolean);
+    const resumeIdx = argv.findIndex(a => a === '--resume' || a === '-r');
+    if (resumeIdx >= 0 && resumeIdx + 1 < argv.length) {
+      const candidate = argv[resumeIdx + 1];
+      // Claude conv IDs are UUID-shaped (8-4-4-4-12 hex with hyphens).
+      if (/^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/i.test(candidate)) {
+        return candidate;
+      }
+    }
+  } catch (_) { /* /proc not available, no parent, etc. */ }
+  return null;
+}
+
+/**
  * Find the JSONL file for a conversation.
  * If conversationId is provided, use it directly.
  * Otherwise, find the most recently modified JSONL in the project directory.

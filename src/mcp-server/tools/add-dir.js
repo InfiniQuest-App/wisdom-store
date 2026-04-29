@@ -14,7 +14,7 @@
  * Requires DASHBOARD_URL env var pointing to the claudeLoop dashboard.
  */
 
-import { findConversationFile } from '../lib/jsonl.js';
+import { findCallerConvIdFromParent } from '../lib/jsonl.js';
 
 export async function handleAddDir(args) {
   const dashboardUrl = process.env.DASHBOARD_URL;
@@ -38,18 +38,20 @@ export async function handleAddDir(args) {
     };
   }
 
-  // Resolve conversation ID
+  // Resolve conversation ID. Prefer parent-process cmdline (--resume UUID) — that's
+  // the authoritative "who is calling me" signal. We deliberately do NOT fall back
+  // to findConversationFile()'s most-recently-modified-JSONL heuristic here: when
+  // multiple workers share a project directory, that heuristic silently picks
+  // whichever sibling wrote most recently, routing /add-dir to the wrong pane
+  // (loop146 → loop11 bug). Per acceptance criteria: fail loudly instead.
   let convId = args.conversation_id;
   if (!convId) {
-    const filePath = findConversationFile();
-    if (filePath) {
-      convId = filePath.match(/([a-f0-9-]+)\.jsonl$/)?.[1];
-    }
+    convId = findCallerConvIdFromParent();
   }
 
   if (!convId && !args.session) {
     return {
-      content: [{ type: 'text', text: 'Could not determine session. Provide conversation_id or session name.' }],
+      content: [{ type: 'text', text: 'Could not determine the calling session. Tried `args.conversation_id` (none) and parent-process cmdline (no `--resume <UUID>` found). Provide an explicit `conversation_id` or `session` argument so /add-dir routes to the right pane.' }],
       isError: true
     };
   }
