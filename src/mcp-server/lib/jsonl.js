@@ -61,6 +61,24 @@ export function findCallerConvIdFromParent() {
 }
 
 /**
+ * Resolve the caller Claude session's working directory by reading the
+ * /proc/<ppid>/cwd symlink. Used by tools that need to scope-check paths
+ * against the caller's project directory (e.g. add_dir).
+ *
+ * Returns the absolute cwd path, or null if /proc isn't available, the
+ * parent went away, or the symlink can't be read. Callers should treat
+ * null as "unknown caller — fail closed" rather than guessing.
+ */
+export function findCallerCwdFromParent() {
+  try {
+    const ppid = process.ppid;
+    if (!ppid) return null;
+    return fs.readlinkSync(`/proc/${ppid}/cwd`);
+  } catch (_) { /* /proc not available, parent gone, etc. */ }
+  return null;
+}
+
+/**
  * Find the JSONL file for a conversation.
  * If conversationId is provided, use it directly.
  * Otherwise, find the most recently modified JSONL in the project directory.

@@ -14,7 +14,64 @@
  * Requires DASHBOARD_URL env var pointing to the claudeLoop dashboard.
  */
 
-import { findCallerConvIdFromParent } from '../lib/jsonl.js';
+import path from 'path';
+import { findCallerConvIdFromParent, findCallerCwdFromParent } from '../lib/jsonl.js';
+
+/**
+ * Detect whether a working directory is inside a worktree of the form
+ * <mainRepo>-worktrees/<session>/.... Returns the main repo path and the
+ * worktrees base path if so; null otherwise.
+ *
+ * Mirrors the regex in claudeLoop's worktree-utils.detectWorktree. We don't
+ * import claudeLoop directly — wisdom-store stays free of that dependency.
+ */
+function detectWorktreeBase(workingDir) {
+  const m = workingDir.match(/^(.+)-worktrees\/([^/]+)/);
+  if (!m) return null;
+  return { mainRepo: m[1], worktreesBase: m[1] + '-worktrees' };
+}
+
+/**
+ * True if `target` is `root` itself or a descendant of `root`.
+ *
+ * Uses path.relative — string-prefix matching is unsafe (`/etc-foo` would
+ * falsely match `/etc`). path.relative produces `..`-prefixed or absolute
+ * output when target is outside root, so we reject those.
+ */
+function isWithinRoot(root, target) {
+  const rel = path.relative(root, target);
+  if (rel === '') return true;
+  if (rel.startsWith('..')) return false;
+  if (path.isAbsolute(rel)) return false;
+  return true;
+}
+
+/**
+ * Compute the set of allowed roots a session can /add-dir into:
+ *   - Caller in a worktree: [mainRepo, mainRepo-worktrees]
+ *   - Otherwise:            [callerCwd, callerCwd-worktrees]
+ *
+ * "callerCwd as project root" is correct when claude was invoked from the
+ * project root (the normal case). If a worker cd's into a subdirectory
+ * before launch, this shrinks scope but never widens it past safe bounds.
+ */
+function computeAllowedRoots(callerCwd) {
+  const resolved = path.resolve(callerCwd);
+  const wt = detectWorktreeBase(resolved);
+  if (wt) return [wt.mainRepo, wt.worktreesBase];
+  return [resolved, resolved + '-worktrees'];
+}
+
+/**
+ * Validate the requested add_dir path against the caller's allowed roots.
+ * Exported for unit testing (the function is pure given callerCwd input).
+ */
+export function validateAddDirScope(callerCwd, requestedPath) {
+  const resolvedRequest = path.resolve(requestedPath);
+  const allowedRoots = computeAllowedRoots(callerCwd);
+  const ok = allowedRoots.some(root => isWithinRoot(root, resolvedRequest));
+  return { ok, allowedRoots, resolvedRequest };
+}
 
 export async function handleAddDir(args) {
   const dashboardUrl = process.env.DASHBOARD_URL;
@@ -34,6 +91,28 @@ export async function handleAddDir(args) {
   if (!args.path.startsWith('/')) {
     return {
       content: [{ type: 'text', text: `\`path\` must be absolute (got: ${args.path}).` }],
+      isError: true
+    };
+  }
+
+  // Scope validation. add_dir must not let a worker widen its permission
+  // scope to arbitrary filesystem paths — that defeats the per-project Read
+  // allowlist tightening (e.g. CPR's scope is project-only, but pre-fix
+  // add_dir({ path: "/etc" }) was succeeding). Allowed roots are the
+  // caller's project root + sibling worktrees only. No `force:true` escape
+  // hatch — wider scope is user-only territory via manual /add-dir.
+  const callerCwd = findCallerCwdFromParent();
+  if (!callerCwd) {
+    return {
+      content: [{ type: 'text', text: 'Could not determine caller cwd from `/proc/<ppid>/cwd`. Cannot scope-check the request. If you need wider permission scope, run `/add-dir <path>` manually in your Claude session — that\'s user-only territory.' }],
+      isError: true
+    };
+  }
+  const scope = validateAddDirScope(callerCwd, args.path);
+  if (!scope.ok) {
+    const rootList = scope.allowedRoots.map(r => `  - ${r}`).join('\n');
+    return {
+      content: [{ type: 'text', text: `Refused: \`${scope.resolvedRequest}\` is outside this session's allowed scope.\n\nAllowed roots:\n${rootList}\n\nIf you need wider scope, run \`/add-dir ${args.path}\` manually in your Claude session — that's user-only territory.` }],
       isError: true
     };
   }
