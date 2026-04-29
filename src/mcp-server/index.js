@@ -50,6 +50,7 @@ import { handleCompactContext } from './tools/compact-context.js';
 import { handleAnnotateWisdom } from './tools/annotate-wisdom.js';
 import { handleInspectPrunedMessages } from './tools/inspect-pruned-messages.js';
 import { handleSandwichPrune } from './tools/sandwich-prune.js';
+import { handleAddDir } from './tools/add-dir.js';
 
 const server = new Server(
   { name: 'wisdom-store', version: '0.3.0' },
@@ -506,6 +507,28 @@ const TOOLS = [
         }
       }
     }
+  },
+  {
+    name: 'add_dir',
+    description: 'Expand your Claude Code permission scope to include an additional directory. Use when you need to read/edit files outside your current project tree (e.g., a sibling project, /tmp, an absolute path elsewhere). The dashboard sends `/add-dir <path>` to your tmux session as a real slash command. Permission grant is per-session and persists until session restart.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        path: {
+          type: 'string',
+          description: 'Absolute directory path to add to your permission scope.'
+        },
+        conversation_id: {
+          type: 'string',
+          description: 'Conversation UUID. If omitted, auto-detects from the current project.'
+        },
+        session: {
+          type: 'string',
+          description: 'Tmux session name. If omitted, looks up by conversation ID via dashboard.'
+        }
+      },
+      required: ['path']
+    }
   }
 ];
 
@@ -552,6 +575,8 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         return await handleInspectPrunedMessages(args);
       case 'sandwich_prune':
         return await handleSandwichPrune(args);
+      case 'add_dir':
+        return await handleAddDir(args);
       default:
         return {
           content: [{ type: 'text', text: `Unknown tool: ${name}` }],
