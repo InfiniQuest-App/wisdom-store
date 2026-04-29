@@ -1,5 +1,6 @@
 # wisdom-store
 
+[![SafeSkill 82/100](https://img.shields.io/badge/SafeSkill-82%2F100_Passes%20with%20Notes-yellow)](https://safeskill.dev/scan/infiniquest-app-wisdom-store)
 An MCP server that gives AI coding assistants persistent memory, context control, and anti-hallucination tools.
 
 > **Early release** — actively developed, APIs may change. Expect rough edges.
