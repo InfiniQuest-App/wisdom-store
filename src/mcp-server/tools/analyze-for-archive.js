@@ -137,6 +137,8 @@ DISTILL (action: "distill", with a 1-2 sentence \`distillation\` field):
 
 THE CRITICAL RULE: pure deletion of failed attempts is dangerous because the assistant later forgets WHY they're on path Y and might re-suggest X. When in doubt between drop and distill, prefer distill.
 
+DISTILLATION CONSTRAINT: never select a single entry containing a tool_use OR tool_result block for action: "distill" — distilling an assistant tool_use would orphan the paired tool_result in the next message; distilling a user tool_result would leave an in-flight tool_use unanswered. For tool-call arcs you want to compress, use action: "drop" on the entire arc (assistant tool_use + user tool_result + any subsequent assistant interpretation), and let an EARLIER user/assistant text-only message carry the distillation summary if needed.
+
 Output format: emit a single JSON object with shape { entries: [...] } where each entry is { uuid, action: "drop"|"distill", distillation?: string, reason: string }. Only include entries that need action. Do NOT include entries you would keep verbatim. The \`reason\` field is REQUIRED for every entry. \`distillation\` is REQUIRED iff action is "distill".`;
 
 function buildUserPrompt({ purpose, compactBody, jsonlMessages }) {

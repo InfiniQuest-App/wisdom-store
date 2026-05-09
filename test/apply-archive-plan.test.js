@@ -320,3 +320,40 @@ test('computeReparentingMap: returns null parent when no surviving ancestor', ()
   const reparent = APPLY_INTERNALS.computeReparentingMap(chain, new Set(['A', 'B']));
   assert.equal(reparent.get('C'), null, 'C becomes new root');
 });
+
+test('refuses to distill an entry containing a tool_use block', async () => {
+  cleanupTestDir();
+  ensureTestDir();
+  // Build a JSONL with one assistant entry that has a tool_use block
+  const conversationId = randomUUID();
+  const filePath = path.join(TEST_DIR, `${conversationId}.jsonl`);
+  const u1 = randomUUID(), u2 = randomUUID(), u3 = randomUUID();
+  const lines = [
+    JSON.stringify({ uuid: u1, parentUuid: null, type: 'user', timestamp: '2026-01-01T00:00:00Z', message: { role: 'user', content: 'do X' } }),
+    JSON.stringify({ uuid: u2, parentUuid: u1, type: 'assistant', timestamp: '2026-01-01T00:00:01Z', message: { role: 'assistant', content: [{ type: 'tool_use', id: 'tu_1', name: 'Bash', input: { command: 'ls' } }] } }),
+    JSON.stringify({ uuid: u3, parentUuid: u2, type: 'user', timestamp: '2026-01-01T00:00:02Z', message: { role: 'user', content: [{ type: 'tool_result', tool_use_id: 'tu_1', content: 'a b c' }] } })
+  ];
+  fs.writeFileSync(filePath, lines.join('\n') + '\n');
+
+  const { planId, checksum } = writePlan({
+    filePath, conversationId,
+    planEntries: [{ uuid: u2, action: 'distill', distillation: 'tried Bash', reason: 'long output' }],
+    jsonlMessages: 3,
+    lastMessageUuid: u3
+  });
+
+  const result = await handleApplyArchivePlan({ planId, checksum, confirm: true });
+  assert.equal(result.isError, true);
+  assert.match(result.content[0].text, /tool_use|tool_result/);
+  // No mutation should have happened
+  const after = fs.readFileSync(filePath, 'utf8');
+  assert.ok(after.includes('"name":"Bash"'), 'tool_use block should still be present');
+});
+
+test('entryHasToolUseOrResult: detects tool_use, tool_result, and skips text-only', () => {
+  assert.equal(APPLY_INTERNALS.entryHasToolUseOrResult({ message: { content: [{ type: 'tool_use' }] } }), 'tool_use');
+  assert.equal(APPLY_INTERNALS.entryHasToolUseOrResult({ message: { content: [{ type: 'tool_result' }] } }), 'tool_result');
+  assert.equal(APPLY_INTERNALS.entryHasToolUseOrResult({ message: { content: [{ type: 'text', text: 'hi' }] } }), null);
+  assert.equal(APPLY_INTERNALS.entryHasToolUseOrResult({ message: { content: 'string' } }), null);
+  assert.equal(APPLY_INTERNALS.entryHasToolUseOrResult({}), null);
+});

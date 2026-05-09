@@ -106,6 +106,19 @@ function computeReparentingMap(chain, droppedUuids) {
   return reparent;
 }
 
+function entryHasToolUseOrResult(fullEntry) {
+  // Distilling away an assistant tool_use orphans the next message's tool_result;
+  // distilling away a user tool_result leaves an in-flight tool_use unanswered.
+  // Either case can confuse Claude Code's chain reader. Detect and refuse.
+  const content = fullEntry?.message?.content;
+  if (!Array.isArray(content)) return null;
+  for (const b of content) {
+    if (b?.type === 'tool_use') return 'tool_use';
+    if (b?.type === 'tool_result') return 'tool_result';
+  }
+  return null;
+}
+
 function makeDistilledEntry(originalFull, distillation) {
   // Preserve all top-level metadata; replace only message content. Role-aware
   // to keep the JSONL valid for Claude Code's reader.
@@ -255,6 +268,28 @@ export async function handleApplyArchivePlan(args = {}) {
     }
   }
 
+  // Defensive: distilling an entry with tool_use/tool_result blocks would orphan
+  // the tool_use_id paired with it across the user/assistant message boundary.
+  // Refuse rather than silently corrupt the chain. Caller can re-run analyze
+  // and ask the LLM to skip such entries (or drop the whole tool-call pair).
+  for (const distill of distillEntries) {
+    const chainEntry = chain.find(c => c.data.uuid === distill.uuid);
+    if (!chainEntry) continue;
+    const fullEntry = readJsonlLine(filePath, chainEntry.line);
+    const blockKind = entryHasToolUseOrResult(fullEntry);
+    if (blockKind) {
+      return {
+        content: [{
+          type: 'text',
+          text: `Cannot apply: plan distills entry ${distill.uuid.slice(0, 8)}... which contains a ${blockKind} block. ` +
+                `Distilling would orphan the paired tool_use_id reference. Re-run analyze to exclude tool_use/tool_result entries from distill, ` +
+                `or drop the full tool-call pair instead. Backup at ${backupPath} (no mutation occurred yet).`
+        }],
+        isError: true
+      };
+    }
+  }
+
   // Build replace map: for each entry whose parent needs rewriting OR which is
   // being distilled (or both), compose the new full entry.
   const replaceMap = new Map();
@@ -336,6 +371,7 @@ export async function handleApplyArchivePlan(args = {}) {
 export const APPLY_INTERNALS = {
   computeReparentingMap,
   makeDistilledEntry,
+  entryHasToolUseOrResult,
   pruneOldBackups,
   findPlanFile,
   BACKUP_RETENTION
