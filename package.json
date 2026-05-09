@@ -28,6 +28,7 @@
     "url": "git+https://github.com/InfiniQuest-App/wisdom-store.git"
   },
   "dependencies": {
+    "@anthropic-ai/sdk": "^0.95.1",
     "@ast-grep/napi": "^0.41.0",
     "@modelcontextprotocol/sdk": "^1.0.0"
   }
