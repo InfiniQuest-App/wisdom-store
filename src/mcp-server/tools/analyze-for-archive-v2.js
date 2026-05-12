@@ -411,7 +411,7 @@ DISTILL (action: "distill", with 1-2 sentence \`distillation\`):
 
 CRITICAL: pure deletion of failed attempts is dangerous because the agent later forgets WHY they're on path Y and might re-suggest X. Prefer distill over drop for any turn whose lesson matters.
 
-Output via submit_archival_plan with entries[] of {turn_id, action, distillation?, reason}. You MUST include EVERY turn with an explicit action. distillation is REQUIRED iff action=distill.
+Output via submit_archival_plan with entries[] of {turn_id, action, distillation?, reason}. ONLY include turns whose action is drop or distill — turns omitted from entries[] are implicitly kept verbatim. The reason field is REQUIRED but should be terse (≤10 words). distillation is REQUIRED iff action=distill (1-2 short sentences).
 
 Default to action:"keep" when in doubt.`;
 
@@ -731,27 +731,56 @@ export async function handleAnalyzeForArchiveV2(args = {}) {
     .map(e => `TURN ${e.turn_id} [${e.type}, importance=${e.importance}]\nsummary: ${e.summary}\nduplicate_signal: ${e.duplicate_signal || ''}\n${e.lesson ? 'lesson: ' + e.lesson : ''}\nartifacts: ${JSON.stringify(e.key_artifacts || [])}`)
     .join('\n\n');
 
-  let pass2Resp, pass2Plan = [], pass2Error = null;
+  let pass2Resp, pass2Plan = [], pass2Error = null, pass2RawDiagnostic = null;
   try {
     pass2Resp = await client.messages.create({
       model: HAIKU_MODEL,
-      max_tokens: 16384,  // Haiku 4.5 max output. 8K was insufficient for a 250-turn explicit-decision schema.
+      max_tokens: 16384,  // Haiku 4.5 max output cap.
       system: [{ type: 'text', text: pass2SystemPrompt, cache_control: { type: 'ephemeral' } }],
       tools: [PASS2_TOOL],
       tool_choice: { type: 'tool', name: 'submit_archival_plan' },
       messages: [{ role: 'user', content: `${purposeText ? 'SESSION PURPOSE:\n' + purposeText + '\n\n' : ''}Total turns: ${turnsToProcess.length}. Plan archival actions per turn.\n\n${summariesForPass2}` }]
     });
+    // Diagnostic logging — capture raw response shape for forensics
+    pass2RawDiagnostic = {
+      stop_reason: pass2Resp.stop_reason,
+      stop_sequence: pass2Resp.stop_sequence,
+      usage: pass2Resp.usage,
+      contentBlockTypes: pass2Resp.content.map(b => b?.type),
+      toolUseInputKeys: null,
+      toolUseEntriesCount: null,
+      preambleTextSample: null,
+      unknownActionsObserved: []
+    };
+    // Capture any preamble text (model often reasons before calling the tool)
+    const textBlocks = pass2Resp.content.filter(b => b.type === 'text');
+    if (textBlocks.length) {
+      pass2RawDiagnostic.preambleTextSample = textBlocks.map(b => b.text || '').join('\n').slice(0, 1500);
+    }
     const tu = pass2Resp.content.find(b => b.type === 'tool_use');
     if (tu) {
+      pass2RawDiagnostic.toolUseInputKeys = Object.keys(tu.input || {});
       pass2Plan = tu.input?.entries || [];
-      // If output was truncated (stop_reason='max_tokens'), surface it — Pass 2's
-      // entries list may be incomplete and downstream apply will under-act.
-      if (pass2Resp.stop_reason === 'max_tokens' && pass2Plan.length < turnsToProcess.length) {
-        pass2Error = `Pass 2 hit max_tokens with only ${pass2Plan.length}/${turnsToProcess.length} decisions — output truncated. Re-run with smaller max_turns or wait for prompt-tightening.`;
+      pass2RawDiagnostic.toolUseEntriesCount = pass2Plan.length;
+      // Tally any unknown action values Haiku emitted (e.g. "keep" when prompt
+      // says omit, or typos like "Drop" with capital). Helps diagnose drift.
+      const validActions = new Set(['keep', 'drop', 'distill']);
+      const actionTallyByValue = {};
+      for (const e of pass2Plan) {
+        const a = e?.action;
+        actionTallyByValue[a] = (actionTallyByValue[a] || 0) + 1;
+        if (!validActions.has(a)) pass2RawDiagnostic.unknownActionsObserved.push({ turn_id: e?.turn_id, action: a });
       }
-    } else pass2Error = `Pass 2 returned no tool_use, stop_reason=${pass2Resp.stop_reason}`;
+      pass2RawDiagnostic.actionTallyByValue = actionTallyByValue;
+      if (pass2Resp.stop_reason === 'max_tokens' && pass2Plan.length < turnsToProcess.length) {
+        pass2Error = `Pass 2 hit max_tokens with only ${pass2Plan.length}/${turnsToProcess.length} decisions — output truncated. See pass2RawDiagnostic in plan file for details.`;
+      }
+    } else {
+      pass2Error = `Pass 2 returned no tool_use block, stop_reason=${pass2Resp.stop_reason}, content blocks: ${pass2RawDiagnostic.contentBlockTypes.join(',')}. See pass2RawDiagnostic.preambleTextSample.`;
+    }
   } catch (e) {
     pass2Error = `Pass 2 HTTP ${e.status || '?'}: ${e.message}`;
+    pass2RawDiagnostic = { sdkError: { status: e.status, message: e.message?.slice(0, 500) } };
   }
 
   // Force-keep recent N turns regardless of Pass 2's decisions (recency safety net).
@@ -862,7 +891,8 @@ export async function handleAnalyzeForArchiveV2(args = {}) {
       cost: pass2CostStr,
       error: pass2Error,
       turnDecisions: pass2Plan,
-      skippedTurns
+      skippedTurns,
+      rawDiagnostic: pass2RawDiagnostic
     }
   };
 
