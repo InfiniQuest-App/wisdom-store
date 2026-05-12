@@ -570,7 +570,7 @@ const TOOLS = [
         },
         modes: {
           type: 'array',
-          items: { type: 'string', enum: ['images', 'memory-reads', 'identical-reads', 'thinking'] },
+          items: { type: 'string', enum: ['images', 'memory-reads', 'identical-reads', 'thinking', 'stale-reads', 'mcp-snapshots'] },
           description: 'Which heuristics to apply. Default all (images, memory-reads, identical-reads, thinking). images=base64 image content; memory-reads=older reads of MEMORY.md/CLAUDE.md/.wisdom/*; identical-reads=older reads with byte-identical content; thinking=condense thinking blocks in older turns (uses v2 plan summaries when available, else heuristic last-paragraph fallback).'
         },
         thinking_marker_style: {

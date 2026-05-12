@@ -31,6 +31,24 @@ const MEMORY_FILE_PATTERNS = [
 const THINKING_KEEP_RECENT_TURNS = 30;  // keep thinking verbatim for the most-recent N turns (active state)
 const THINKING_MIN_BYTES = 400;  // don't bother condensing tiny thinking blocks
 
+// Pattern for MCP "status snapshot" tools — calls that return point-in-time
+// state which gets stale fast (orchestrator queue, session info, etc.).
+// When two calls with the same name + args appear in chain order, the older
+// one's tool_result is superseded by the newer.
+const MCP_SNAPSHOT_TOOL_PATTERNS = [
+  /^mcp__orchestrator__get_suggestions$/i,
+  /^mcp__orchestrator__get_session_info$/i,
+  /^mcp__orchestrator__get_session_output$/i,
+  /^mcp__orchestrator__list_sessions$/i,
+  /^mcp__orchestrator__list_workers$/i,
+  /^mcp__orchestrator__get_orchestrators$/i,
+  /^mcp__worker__get_my_tasks$/i,
+  /^mcp__worker__who_am_i$/i,
+  /^mcp__worker__list_file_locks$/i
+];
+const MCP_SNAPSHOT_MIN_BYTES = 500;  // don't bother for trivial snapshots
+const STALE_READ_MIN_BYTES = 500;    // don't bother for tiny reads
+
 const IMAGE_EXT = /\.(png|jpe?g|gif|webp|bmp|svg|ico|tiff?)$/i;
 
 /**
@@ -52,6 +70,11 @@ function looksLikeImageBase64(toolResultText, precedingToolUseInput) {
     if (base64ish / sample.length < 0.05) return true;
   }
   return false;
+}
+
+function isMcpSnapshotTool(toolName) {
+  if (!toolName || typeof toolName !== 'string') return false;
+  return MCP_SNAPSHOT_TOOL_PATTERNS.some(re => re.test(toolName));
 }
 
 function isMemoryStylePath(fp) {
@@ -167,30 +190,38 @@ export function buildCondensePlan(chainFullEntries, opts = {}) {
     identicalReadsBytesSaved: 0,
     thinkingCondensed: 0,
     thinkingBytesSaved: 0,
-    thinkingFallbackUsed: 0,  // count of thinking blocks condensed via heuristic (no plan)
+    thinkingFallbackUsed: 0,
+    staleReadsCondensed: 0,
+    staleReadsBytesSaved: 0,
+    mcpSnapshotsCondensed: 0,
+    mcpSnapshotsBytesSaved: 0,
     totalEntriesScanned: chainFullEntries.length
   };
 
-  // First pass: collect all file_read tool_uses + their tool_results.
-  // The structure: an assistant entry contains tool_use blocks. The NEXT entry
-  // (a user-role message) contains tool_result blocks keyed by tool_use_id.
-  // We track Reads across entries to detect duplicates and stale reads.
-  const reads = []; // { entryIdx, fp, toolUseId, content, contentLen, contentHash }
+  // First pass: collect all tool_use → tool_result pairings. For each, capture
+  // the tool name + args + the result content. Used by multiple modes:
+  //   - reads: indexed by file_path (for memory-reads, identical-reads, stale-reads)
+  //   - mcpSnapshots: indexed by tool name + args (for mcp-snapshots)
+  const reads = [];
+  const mcpSnapshots = []; // {readEntryIdx, resultEntryIdx, resultBlockIdx, toolName, argsKey, content, contentLen, resultUuid}
 
   for (let i = 0; i < chainFullEntries.length; i++) {
     const entry = chainFullEntries[i].fullEntry;
     const content = entry?.message?.content;
     if (!Array.isArray(content)) continue;
     for (const block of content) {
-      if (block?.type === 'tool_use' && block.name === 'Read' && block.input?.file_path) {
-        // Look ahead for the matching tool_result in the immediately-following entries
-        const tuId = block.id;
-        for (let j = i + 1; j < Math.min(i + 5, chainFullEntries.length); j++) {
-          const next = chainFullEntries[j].fullEntry;
-          const nc = next?.message?.content;
-          if (!Array.isArray(nc)) continue;
-          for (const nb of nc) {
-            if (nb?.type === 'tool_result' && nb.tool_use_id === tuId) {
+      if (block?.type !== 'tool_use') continue;
+      const isRead = block.name === 'Read' && block.input?.file_path;
+      const isMcpSnapshot = isMcpSnapshotTool(block.name);
+      if (!isRead && !isMcpSnapshot) continue;
+      const tuId = block.id;
+      // Look ahead for matching tool_result
+      for (let j = i + 1; j < Math.min(i + 5, chainFullEntries.length); j++) {
+        const next = chainFullEntries[j].fullEntry;
+        const nc = next?.message?.content;
+        if (!Array.isArray(nc)) continue;
+        for (const nb of nc) {
+          if (nb?.type === 'tool_result' && nb.tool_use_id === tuId) {
               // Handle three shapes of tool_result.content:
               //   1. string — the typical small/medium read
               //   2. array of {type:"text", text}    — multi-text return
@@ -205,22 +236,35 @@ export function buildCondensePlan(chainFullEntries, opts = {}) {
                   else if (c?.type === 'image' && c.source?.data) imageBase64Length += c.source.data.length;
                 }
               }
-              reads.push({
+              const sharedSpec = {
                 readEntryIdx: i,
                 resultEntryIdx: j,
                 resultBlockIdx: nc.indexOf(nb),
-                fp: block.input.file_path,
                 toolUseId: tuId,
                 content: text,
                 contentLen: text.length,
                 imageBase64Length,
                 resultUuid: chainFullEntries[j].uuid
-              });
+              };
+              if (isRead) {
+                reads.push({
+                  ...sharedSpec,
+                  fp: block.input.file_path,
+                  offset: block.input.offset || null,
+                  limit: block.input.limit || null
+                });
+              }
+              if (isMcpSnapshot && text.length >= MCP_SNAPSHOT_MIN_BYTES) {
+                mcpSnapshots.push({
+                  ...sharedSpec,
+                  toolName: block.name,
+                  argsKey: JSON.stringify(block.input || {})
+                });
+              }
               break;
             }
           }
         }
-      }
     }
   }
 
@@ -296,6 +340,78 @@ export function buildCondensePlan(chainFullEntries, opts = {}) {
       enqueueImageBlockReplace(replace, chainFullEntries, r, imageMarker(totalBytes, r.fp));
       stats.imagesCondensed++;
       stats.imagesBytesSaved += totalBytes;
+    }
+  }
+
+  // --- Mode: stale-reads ---
+  // Same path + same offset + same limit, multiple times in chain order:
+  // older reads are superseded (the newer one captures current file state).
+  // Different from memory-reads (which condenses any older read of memory-style paths,
+  // even if file content differs); stale-reads requires same args = redundant call.
+  if (modes.has('stale-reads')) {
+    const byArgs = new Map();
+    for (const r of reads) {
+      const key = r.fp + '|' + (r.offset ?? '') + '|' + (r.limit ?? '');
+      if (!byArgs.has(key)) byArgs.set(key, []);
+      byArgs.get(key).push(r);
+    }
+    for (const [key, group] of byArgs) {
+      if (group.length < 2) continue;
+      const latest = group[group.length - 1];
+      for (let k = 0; k < group.length - 1; k++) {
+        const r = group[k];
+        if (r.contentLen < STALE_READ_MIN_BYTES) continue;
+        if (replace.has(r.resultUuid)) continue; // already scheduled by another mode
+        enqueueBlockReplace(replace, chainFullEntries, r, staleReadMarker({
+          filePath: r.fp,
+          originalLength: r.contentLen,
+          supersededByEntry: latest.resultUuid,
+          reason: 'older read of same path/offset/limit superseded'
+        }), 'stale-reads');
+        if (!stats.staleReadsCondensed) stats.staleReadsCondensed = 0;
+        if (!stats.staleReadsBytesSaved) stats.staleReadsBytesSaved = 0;
+        stats.staleReadsCondensed++;
+        stats.staleReadsBytesSaved += r.contentLen;
+      }
+    }
+  }
+
+  // --- Mode: mcp-snapshots ---
+  // MCP status-snapshot tools (get_suggestions, get_session_info, etc.) return
+  // point-in-time state. When the same call appears multiple times in chain order
+  // with the same args, older snapshots are stale.
+  if (modes.has('mcp-snapshots')) {
+    const byKey = new Map();
+    for (const s of mcpSnapshots) {
+      const key = s.toolName + '|' + s.argsKey;
+      if (!byKey.has(key)) byKey.set(key, []);
+      byKey.get(key).push(s);
+    }
+    for (const [key, group] of byKey) {
+      if (group.length < 2) continue;
+      const latest = group[group.length - 1];
+      for (let k = 0; k < group.length - 1; k++) {
+        const s = group[k];
+        if (s.contentLen < MCP_SNAPSHOT_MIN_BYTES) continue;
+        if (replace.has(s.resultUuid)) continue;
+        const target = chainFullEntries[s.resultEntryIdx].fullEntry;
+        const newContent = target.message.content.map((block, idx) => {
+          if (idx !== s.resultBlockIdx) return block;
+          const marker = `[stale MCP snapshot elided: ${(s.contentLen/1024).toFixed(1)} KB from ${s.toolName}; superseded by uuid ${latest.resultUuid?.slice(0,8) || '?'}]`;
+          return { ...block, content: marker };
+        });
+        const next = {
+          ...target,
+          message: { ...target.message, content: newContent },
+          _condensed: true,
+          _condenseSource: 'mcp-snapshots'
+        };
+        replace.set(target.uuid, next);
+        if (!stats.mcpSnapshotsCondensed) stats.mcpSnapshotsCondensed = 0;
+        if (!stats.mcpSnapshotsBytesSaved) stats.mcpSnapshotsBytesSaved = 0;
+        stats.mcpSnapshotsCondensed++;
+        stats.mcpSnapshotsBytesSaved += s.contentLen;
+      }
     }
   }
 
