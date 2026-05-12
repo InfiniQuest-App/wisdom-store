@@ -80,6 +80,22 @@ const REFETCH_BASH_CAVEAT_TOOLS = new Set(['Bash']);
 // Keep refetch-eligible tool_results verbatim for the most-recent N turns (active state).
 const REFETCH_KEEP_RECENT_TURNS = 30;
 
+// tool-args mode: condense verbose tool_use INPUT fields where (a) the field
+// is a free-form string, (b) the structural content (subject/name/etc.) is
+// short enough to keep verbatim, and (c) the agent has enough context from the
+// kept fields to remember what it asked for. Skips recent N turns.
+const TOOL_ARGS_KEEP_RECENT_TURNS = 30;
+const TOOL_ARGS_MIN_FIELD_BYTES = 300;  // don't bother condensing short fields
+const TOOL_ARGS_PREVIEW_CHARS = 100;
+
+// Per-tool: which fields to condense (the "long" ones), with the structural
+// fields kept verbatim implicitly (anything not listed is preserved).
+const TOOL_ARGS_FIELDS = {
+  'TaskCreate': ['description'],
+  'mcp__orchestrator__create_session': ['initialTask'],
+  'mcp__orchestrator__assign_task': ['task']
+};
+
 const IMAGE_EXT = /\.(png|jpe?g|gif|webp|bmp|svg|ico|tiff?)$/i;
 
 /**
@@ -286,6 +302,8 @@ export function buildCondensePlan(chainFullEntries, opts = {}) {
     mcpSnapshotsBytesSaved: 0,
     refetchMarkersCondensed: 0,
     refetchMarkersBytesSaved: 0,
+    toolArgsCondensed: 0,
+    toolArgsBytesSaved: 0,
     totalEntriesScanned: chainFullEntries.length,
     _blockCondenseRecords: []  // records for sidecar persistence; not meant for user display
   };
@@ -669,6 +687,72 @@ export function buildCondensePlan(chainFullEntries, opts = {}) {
             break;
           }
         }
+      }
+    }
+  }
+
+  // --- Mode: tool-args ---
+  // Condense verbose string fields in tool_use INPUTS (not tool_results).
+  // Risky-ish but bounded: we only touch tools where the AGENT'S MEMORY of
+  // "what I asked" is preserved by other (kept) fields like subject/name, and
+  // the long field is the kind of thing the worker has in their own memory.
+  // Skip recent N turns. The marker preserves the first ~100 chars of the field
+  // and points to .condense-backups for the original.
+  if (modes.has('tool-args')) {
+    const turnsByEntryUuid = opts.turnsByEntryUuid || new Map();
+    const totalTurns = opts.totalTurns || 0;
+    const recentBoundary = totalTurns - TOOL_ARGS_KEEP_RECENT_TURNS;
+
+    for (let i = 0; i < chainFullEntries.length; i++) {
+      const entry = chainFullEntries[i].fullEntry;
+      const c = entry?.message?.content;
+      if (!Array.isArray(c)) continue;
+
+      const turnInfo = turnsByEntryUuid.get(chainFullEntries[i].uuid);
+      const turn_id = turnInfo?.turn_id;
+      if (turn_id != null && totalTurns > 0 && turn_id > recentBoundary) continue;
+
+      let modified = false;
+      const newContent = c.map((b, bIdx) => {
+        if (b?.type !== 'tool_use') return b;
+        const fields = TOOL_ARGS_FIELDS[b.name];
+        if (!fields) return b;
+        if (isAlreadyCondensed(sidecar, entry.uuid, bIdx)) return b;
+        // Check if any of this tool's "long" fields is condensable
+        let touched = false;
+        const newInput = { ...b.input };
+        let originalBytesField = 0;
+        for (const fieldName of fields) {
+          const val = newInput[fieldName];
+          if (typeof val !== 'string') continue;
+          if (val.length < TOOL_ARGS_MIN_FIELD_BYTES) continue;
+          const preview = val.slice(0, TOOL_ARGS_PREVIEW_CHARS);
+          const elidedLen = val.length - preview.length;
+          // Marker: keep preview, signal elision, point to backup
+          newInput[fieldName] = `${preview}... [${elidedLen} more chars elided; full original in .condense-backups/. Tool: ${b.name}, field: ${fieldName}]`;
+          originalBytesField += val.length;
+          touched = true;
+        }
+        if (!touched) return b;
+        modified = true;
+        if (!stats.toolArgsCondensed) stats.toolArgsCondensed = 0;
+        if (!stats.toolArgsBytesSaved) stats.toolArgsBytesSaved = 0;
+        stats.toolArgsCondensed++;
+        stats.toolArgsBytesSaved += (originalBytesField - JSON.stringify(newInput).length);
+        recordCondense(stats._blockCondenseRecords, entry.uuid, bIdx, 'tool-args', originalBytesField, JSON.stringify(newInput).length, { toolName: b.name });
+        return { ...b, input: newInput };
+      });
+
+      if (modified) {
+        const existing = replace.get(entry.uuid);
+        const baseTarget = existing || entry;
+        const next = {
+          ...baseTarget,
+          message: { ...baseTarget.message, content: newContent },
+          _condensed: true,
+          _condenseSource: (existing?._condenseSource || '') + (existing ? '+tool-args' : 'tool-args')
+        };
+        replace.set(entry.uuid, next);
       }
     }
   }
