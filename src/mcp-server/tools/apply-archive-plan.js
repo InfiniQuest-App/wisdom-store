@@ -242,9 +242,78 @@ export async function handleApplyArchivePlan(args = {}) {
   fs.copyFileSync(filePath, backupPath);
   const prunedOldBackups = pruneOldBackups(backupDir, convId);
 
-  // Build drop set + distill replace map.
-  const droppedUuids = new Set(plan.entries.filter(e => e.action === 'drop').map(e => e.uuid));
-  const distillEntries = plan.entries.filter(e => e.action === 'distill');
+  // Optional: score-threshold override. When min_keep_score and/or min_distill_score
+  // are provided, the per-turn action is RECOMPUTED from value_score:
+  //   score >= min_keep_score        → keep
+  //   min_keep_score > score >= min_distill_score → distill (use Pass 2's distillation text if available, else Pass 1 summary)
+  //   score < min_distill_score      → drop
+  // This lets the user dial aggressiveness via a single number rather than re-running analyze.
+  const minKeepScore = Number.isInteger(args.min_keep_score) ? args.min_keep_score : null;
+  const minDistillScore = Number.isInteger(args.min_distill_score) ? args.min_distill_score : null;
+  const scoreOverride = minKeepScore != null || minDistillScore != null;
+  const scoresByTurnId = new Map();
+  const summariesByTurnId = new Map();
+  if (scoreOverride && Array.isArray(plan.pass1?.summaries)) {
+    for (const s of plan.pass1.summaries) {
+      if (typeof s?.turn_id === 'number') {
+        if (typeof s.value_score === 'number') scoresByTurnId.set(s.turn_id, s.value_score);
+        if (typeof s.summary === 'string') summariesByTurnId.set(s.turn_id, s.summary);
+      }
+    }
+  }
+
+  // Recompute Pass 2 turn-level decisions if score thresholds are provided.
+  let effectiveTurnDecisions = plan.pass2?.turnDecisions || [];
+  let scoreOverrideStats = { reclassified: 0, missingScore: 0 };
+  if (scoreOverride && effectiveTurnDecisions.length > 0) {
+    const keepThresh = minKeepScore != null ? minKeepScore : 71;
+    const distillThresh = minDistillScore != null ? minDistillScore : 31;
+    effectiveTurnDecisions = effectiveTurnDecisions.map(d => {
+      const sc = scoresByTurnId.get(d.turn_id);
+      if (sc == null) { scoreOverrideStats.missingScore++; return d; }
+      let newAction;
+      if (sc >= keepThresh) newAction = 'keep';
+      else if (sc >= distillThresh) newAction = 'distill';
+      else newAction = 'drop';
+      if (newAction !== d.action) {
+        scoreOverrideStats.reclassified++;
+        const distillText = d.distillation || summariesByTurnId.get(d.turn_id) || `[turn ${d.turn_id}: ${d.reason || 'no reason captured'}]`;
+        return { ...d, action: newAction, distillation: newAction === 'distill' ? distillText : d.distillation, reason: `[score=${sc}, threshold-recomputed; was ${d.action}] ${d.reason || ''}` };
+      }
+      return d;
+    });
+  }
+
+  // Re-derive plan.entries from the (possibly re-classified) effectiveTurnDecisions.
+  // We can\'t safely reuse plan.entries because they were derived from the original
+  // Pass 2 decisions and don\'t reflect any score-override re-classification.
+  let effectivePlanEntries = plan.entries;
+  if (scoreOverride) {
+    // Need turn → entry-uuid mapping to re-expand. Walk the live chain.
+    const liveChain = walkChain(entries);
+    // Reuse the existing turn-segmentation logic from analyze v2
+    const { segmentTurns: _segmentTurns } = await import('../lib/turn-segmenter.js');
+    const liveTurns = _segmentTurns(liveChain, readJsonlLine, filePath);
+    const liveTurnsById = new Map(liveTurns.map(t => [t.turn_id, t]));
+    const reExpanded = [];
+    for (const d of effectiveTurnDecisions) {
+      const t = liveTurnsById.get(d.turn_id);
+      if (!t) continue;
+      if (d.action === 'keep') continue;
+      if (d.action === 'drop') {
+        for (const e of t.entries) reExpanded.push({ uuid: e.data.uuid, action: 'drop', reason: `[turn ${t.turn_id}] ${d.reason || ''}` });
+      } else if (d.action === 'distill') {
+        const [first, ...rest] = t.entries;
+        reExpanded.push({ uuid: first.data.uuid, action: 'distill', distillation: d.distillation || '(no distillation)', reason: `[turn ${t.turn_id}] ${d.reason || ''}` });
+        for (const e of rest) reExpanded.push({ uuid: e.data.uuid, action: 'drop', reason: `[turn ${t.turn_id}] (collapsed)` });
+      }
+    }
+    effectivePlanEntries = reExpanded;
+  }
+
+  // Build drop set + distill replace map from EFFECTIVE entries (post-score-override).
+  const droppedUuids = new Set(effectivePlanEntries.filter(e => e.action === 'drop').map(e => e.uuid));
+  const distillEntries = effectivePlanEntries.filter(e => e.action === 'distill');
 
   // Reparent surviving entries whose parent was dropped.
   const reparent = computeReparentingMap(chain, droppedUuids);
@@ -268,6 +337,7 @@ export async function handleApplyArchivePlan(args = {}) {
     }
   }
 
+  // (uses effectivePlanEntries from above — may differ from plan.entries if score override applied)
   // Defensive: distilling an entry with tool_use/tool_result blocks would orphan
   // the tool_use_id paired with it across the user/assistant message boundary.
   // Refuse rather than silently corrupt the chain. Caller can re-run analyze
@@ -339,6 +409,7 @@ export async function handleApplyArchivePlan(args = {}) {
   }
 
   const distilled = distillEntries.length;
+  const totalEffectiveEntries = effectivePlanEntries.length;
   const dropped = droppedUuids.size;
   const reductionPct = stats.sizeBefore > 0
     ? Math.round((1 - stats.sizeAfter / stats.sizeBefore) * 100)
@@ -355,7 +426,8 @@ export async function handleApplyArchivePlan(args = {}) {
     ``,
     `**Drop mode**: ${orphanDrops ? 'orphan (entries stay in file, unreachable from chain walks; inspectable via inspect_pruned_messages; reversible by re-linking parentUuids)' : 'physical remove (entries deleted from file; reversible only via backup restore)'}`,
     ``,
-    `**Applied entries**: ${plan.entries.length}`,
+    scoreOverride ? `**Score-threshold override active** (min_keep=${minKeepScore ?? '(default 71)'}, min_distill=${minDistillScore ?? '(default 31)'}): ${scoreOverrideStats.reclassified} of ${effectiveTurnDecisions.length} turn decisions reclassified; ${scoreOverrideStats.missingScore} turns lacked value_score (kept original action)` : '',
+    `**Applied entries**: ${effectivePlanEntries.length}${scoreOverride ? ` (was ${plan.entries.length} before score override)` : ''}`,
     `- Dropped: ${dropped}${orphanDrops ? ' (orphaned, in file)' : ` (actually removed: ${stats.droppedActual})`}`,
     `- Distilled: ${distilled}`,
     `- Reparented (parent was dropped): ${reparent.size}`,
@@ -368,7 +440,9 @@ export async function handleApplyArchivePlan(args = {}) {
   return {
     content: [{ type: 'text', text: report }],
     structuredContent: {
-      applied: plan.entries.length,
+      applied: effectivePlanEntries.length,
+      scoreOverrideActive: scoreOverride,
+      scoreOverrideReclassified: scoreOverrideStats.reclassified,
       dropped: orphanDrops ? droppedUuids.size : stats.droppedActual,
       droppedMode: orphanDrops ? 'orphan' : 'physical-remove',
       distilled,
