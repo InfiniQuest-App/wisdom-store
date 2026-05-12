@@ -325,7 +325,7 @@ const PASS1_TOOL = {
   }
 };
 
-const PASS2_SYSTEM = `You are an archival planner. You receive structured per-turn summaries of a Claude Code conversation, and you decide which turns to drop entirely, which to distill (replace with a 1-2 sentence summary), and which to keep verbatim (the implicit default).
+const PASS2_SYSTEM_DEFAULT = `You are an archival planner. You receive structured per-turn summaries of a Claude Code conversation, and you decide which turns to drop entirely, which to distill (replace with a 1-2 sentence summary), and which to keep verbatim (the implicit default).
 
 LOAD-BEARING DEFINITION (the user's words):
 > Keeping things essential to its job, as presumed from user messages. Typically having the latest content/state on files and plans it frequently touches, summary of reasons we changed directions / why we're going the direction we are now. Don't need duplicates, especially older copies. But simply pruning out older copies does run the risk of losing: what we tried that didn't work, why we didn't do X. Worth summarizing mistakes / pitfalls / reasons / current paths.
@@ -334,11 +334,10 @@ KEEP VERBATIM (action: "keep"):
 - importance:"load_bearing" turns whose content is still load-bearing (not superseded later)
 - the most recent ~30 turns (active state)
 - direction-change rationale, decisions, current-state file content
-- Use action:"keep" explicitly so the audit log shows your reasoning per turn
 
 DROP (action: "drop"):
 - importance:"discardable" turns
-- file_read of path X when a later file_read of path X exists (the older copy is superseded)
+- file_read of path X when a later file_read of path X exists
 - duplicate searches/queries where a later one supersedes
 - micro-exchanges with no decision
 - tool_query turns whose result is already incorporated into a later decision
@@ -350,9 +349,50 @@ DISTILL (action: "distill", with 1-2 sentence \`distillation\`):
 
 CRITICAL: pure deletion of failed attempts is dangerous because the agent later forgets WHY they're on path Y and might re-suggest X. Prefer distill over drop for any turn whose lesson matters.
 
-Output via submit_archival_plan with entries[] of {turn_id, action, distillation?, reason}. You MUST include EVERY turn in entries[] with an explicit action — keep / drop / distill. The reason field is REQUIRED. distillation is REQUIRED iff action=distill (1-2 sentences capturing lesson/decision/outcome).
+Output via submit_archival_plan with entries[] of {turn_id, action, distillation?, reason}. You MUST include EVERY turn with an explicit action. distillation is REQUIRED iff action=distill.
 
-Default to action:"keep" when in doubt — pure deletion is dangerous because the agent later forgets WHY it's on path Y and might re-suggest X.`;
+Default to action:"keep" when in doubt.`;
+
+const PASS2_SYSTEM_AGGRESSIVE = `You are an AGGRESSIVE archival planner. The user has already accepted information loss in exchange for context window savings — they want the conversation cut down to its essential context (target ~50% of current size or below). You receive structured per-turn summaries and decide drop / distill / keep per turn.
+
+LOAD-BEARING DEFINITION (the user's words):
+> Keeping things essential to its job, as presumed from user messages. Typically having the latest content/state on files and plans it frequently touches, summary of reasons we changed directions / why we're going the direction we are now. Don't need duplicates, especially older copies. But simply pruning out older copies does run the risk of losing: what we tried that didn't work, why we didn't do X. Worth summarizing mistakes / pitfalls / reasons / current paths.
+
+USER'S EXPLICIT CONSTRAINTS FOR THIS RUN:
+- Target ~50% reduction in active chain. Be willing to drop more than you would in a conservative run.
+- Distill aggressively to preserve lessons while shrinking byte count. A turn full of investigation that resolved into a one-sentence conclusion → distill, don't keep verbatim.
+- Drop ANY duplicate (even minor): file_reads of the same path, status checks, "let me look at this again" turns.
+- Drop ANY tool_query whose result is incorporated downstream — the decision itself preserves the conclusion.
+- Drop ALL system_or_meta turns (system reminders, micro-exchanges, no-action turns).
+- KEEP only: latest decisions per topic, the most recent ~20 turns of active state, and the user's most recent expressed intents/constraints/preferences.
+
+DROP (action: "drop") — BE LIBERAL:
+- importance:"discardable" turns: ALWAYS drop
+- importance:"supporting" turns: drop unless the support is uniquely needed downstream
+- file_read / search / tool_query turns: drop if the answer was incorporated into a later turn
+- system_or_meta turns: ALWAYS drop
+- micro-exchanges (just acknowledgments, "ok", "thanks"): ALWAYS drop
+- Older versions of decisions superseded by later ones: drop the older
+
+DISTILL (action: "distill", with 1-2 sentence \`distillation\`) — USE FREELY:
+- debug_attempt / dead_end with a lesson: distill to capture the lesson
+- planning turn superseded by later planning: distill to capture what was decided
+- Long multi-step turns where the user only needs to know the outcome: distill
+- Any turn classified "load_bearing" that's heavy on bytes but whose load-bearing element is one decision: distill to that decision
+
+KEEP VERBATIM (action: "keep"):
+- The MOST RECENT decision per ongoing topic
+- The most recent ~20 turns (active state)
+- User's expressed intents, constraints, preferences (especially recent)
+- Direction-change rationale that's still current
+
+CRITICAL: don't outright DELETE failed-attempt context — distill it instead. The lesson must survive even if the long arc doesn't.
+
+Output via submit_archival_plan with entries[] of {turn_id, action, distillation?, reason}. You MUST include EVERY turn with an explicit action. distillation is REQUIRED iff action=distill.
+
+Aim for: ~30-50% drop, ~15-30% distill, ~30-50% keep. If you find yourself keeping >60% of turns, you're being too conservative for this run.`;
+
+const PASS2_SYSTEM = PASS2_SYSTEM_DEFAULT;
 
 const PASS2_TOOL = {
   name: 'submit_archival_plan',
@@ -520,6 +560,8 @@ export async function handleAnalyzeForArchiveV2(args = {}) {
   }
 
   const allowApiKey = args.allowApiKey === true;
+  const aggressive = args.aggressive === true;
+  const pass2SystemPrompt = aggressive ? PASS2_SYSTEM_AGGRESSIVE : PASS2_SYSTEM_DEFAULT;
   let clientResult;
   try { clientResult = getAnthropicClient({ allowApiKey }); }
   catch (e) { return { content: [{ type: 'text', text: `Auth: ${e.message}` }], isError: true }; }
@@ -617,7 +659,7 @@ export async function handleAnalyzeForArchiveV2(args = {}) {
     pass2Resp = await client.messages.create({
       model: HAIKU_MODEL,
       max_tokens: 16384,  // Haiku 4.5 max output. 8K was insufficient for a 250-turn explicit-decision schema.
-      system: [{ type: 'text', text: PASS2_SYSTEM, cache_control: { type: 'ephemeral' } }],
+      system: [{ type: 'text', text: pass2SystemPrompt, cache_control: { type: 'ephemeral' } }],
       tools: [PASS2_TOOL],
       tool_choice: { type: 'tool', name: 'submit_archival_plan' },
       messages: [{ role: 'user', content: `Total turns: ${turnsToProcess.length}. Plan archival actions per turn.\n\n${summariesForPass2}` }]
@@ -794,4 +836,4 @@ export async function handleAnalyzeForArchiveV2(args = {}) {
   return { content: [{ type: 'text', text: lines }] };
 }
 
-export const V2_INTERNALS = { canonicalStringify, archiveDirsFor, PASS1_SYSTEM, PASS2_SYSTEM };
+export const V2_INTERNALS = { canonicalStringify, archiveDirsFor, PASS1_SYSTEM, PASS2_SYSTEM_DEFAULT, PASS2_SYSTEM_AGGRESSIVE };
