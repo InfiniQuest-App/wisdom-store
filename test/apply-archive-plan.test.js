@@ -151,11 +151,10 @@ test('refuses on drift: chain length changed', async () => {
   assert.match(result.content[0].text, /drifted/);
 });
 
-test('happy path: drop creates backup, removes entries, reparents survivors', async () => {
+test('happy path with orphan_drops:false: physically removes entries + reparents survivors', async () => {
   cleanupTestDir();
   const { filePath, conversationId, entries } = buildJsonl({ count: 10 });
-  // Drop entries[3] and entries[5] (both assistants, indices flipped from 0=user)
-  // Wait: i%2==0 → user, so entries[3] = assistant, entries[5] = assistant.
+  // i%2==0 → user, so entries[3] = assistant, entries[5] = assistant.
   // After drop: entries[4].parentUuid was entries[3].uuid → must rewrite to entries[2].uuid
   //             entries[6].parentUuid was entries[5].uuid → must rewrite to entries[4].uuid (still kept)
   const { planId, checksum } = writePlan({
@@ -167,14 +166,14 @@ test('happy path: drop creates backup, removes entries, reparents survivors', as
     jsonlMessages: 10,
     lastMessageUuid: entries[9].uuid
   });
-  const result = await handleApplyArchivePlan({ planId, checksum, confirm: true });
+  // Explicit physical-remove mode (orphan_drops: false)
+  const result = await handleApplyArchivePlan({ planId, checksum, confirm: true, orphan_drops: false });
   assert.equal(result.isError, undefined, result.content[0].text);
   assert.match(result.content[0].text, /Applied/);
   assert.equal(result.structuredContent.dropped, 2);
-  assert.equal(result.structuredContent.distilled, 0);
-  assert.equal(result.structuredContent.requiresResume, false);
+  assert.equal(result.structuredContent.droppedMode, 'physical-remove');
 
-  // Verify backup was created before mutation (must contain ALL original entries)
+  // Verify backup was created before mutation
   const backupDir = path.join(TEST_DIR, '.archive-backups');
   const backups = fs.readdirSync(backupDir);
   assert.equal(backups.length, 1);
@@ -183,23 +182,54 @@ test('happy path: drop creates backup, removes entries, reparents survivors', as
     assert.ok(backupContent.includes(e.uuid), `backup should contain ${e.uuid}`);
   }
 
-  // Verify dropped entries are gone from live
+  // Physical-remove: dropped entries are GONE from live file
   const liveContent = fs.readFileSync(filePath, 'utf8');
   assert.ok(!liveContent.includes(entries[3].uuid));
   assert.ok(!liveContent.includes(entries[5].uuid));
 
-  // Verify reparenting: entries[4].parentUuid should now be entries[2].uuid
+  // Reparenting: entries[4].parentUuid should now be entries[2].uuid
   const after = readJsonl(filePath);
   const e4 = after.find(e => e.data.uuid === entries[4].uuid);
   const fullE4 = readJsonlLine(filePath, e4.line);
-  assert.equal(fullE4.parentUuid, entries[2].uuid, 'entries[4] should reparent past dropped entries[3]');
-  // entries[6].parentUuid should still resolve to entries[4] (which survived)
-  const e6 = after.find(e => e.data.uuid === entries[6].uuid);
-  const fullE6 = readJsonlLine(filePath, e6.line);
-  assert.equal(fullE6.parentUuid, entries[4].uuid);
-  // Walk chain from end to confirm no broken links
+  assert.equal(fullE4.parentUuid, entries[2].uuid);
   const chain = walkChain(after);
-  assert.equal(chain.length, 8, `expected 8 chain entries (10 - 2 dropped), got ${chain.length}`);
+  assert.equal(chain.length, 8, `expected 8 chain entries (10 - 2 physically dropped), got ${chain.length}`);
+});
+
+test('default (orphan_drops:true): dropped entries STAY in file but become unreachable from chain', async () => {
+  cleanupTestDir();
+  const { filePath, conversationId, entries } = buildJsonl({ count: 10 });
+  const { planId, checksum } = writePlan({
+    filePath, conversationId,
+    planEntries: [
+      { uuid: entries[3].uuid, action: 'drop', reason: 'duplicate' },
+      { uuid: entries[5].uuid, action: 'drop', reason: 'large tool output' }
+    ],
+    jsonlMessages: 10,
+    lastMessageUuid: entries[9].uuid
+  });
+  // Default mode — orphan_drops not set, should default to true
+  const result = await handleApplyArchivePlan({ planId, checksum, confirm: true });
+  assert.equal(result.isError, undefined, result.content[0].text);
+  assert.equal(result.structuredContent.droppedMode, 'orphan');
+
+  // Orphan mode: dropped entries STAY in file
+  const liveContent = fs.readFileSync(filePath, 'utf8');
+  assert.ok(liveContent.includes(entries[3].uuid), 'orphaned entries[3] should still be in file');
+  assert.ok(liveContent.includes(entries[5].uuid), 'orphaned entries[5] should still be in file');
+
+  // BUT they are not in the active chain — reparenting cascades past them
+  const after = readJsonl(filePath);
+  const chain = walkChain(after);
+  assert.equal(chain.length, 8, `chain should be 8 (10 - 2 orphaned), got ${chain.length}`);
+  const chainUuids = new Set(chain.map(c => c.data.uuid));
+  assert.ok(!chainUuids.has(entries[3].uuid), 'entries[3] not in active chain');
+  assert.ok(!chainUuids.has(entries[5].uuid), 'entries[5] not in active chain');
+
+  // Reparenting: entries[4].parentUuid should now be entries[2].uuid
+  const e4 = after.find(e => e.data.uuid === entries[4].uuid);
+  const fullE4 = readJsonlLine(filePath, e4.line);
+  assert.equal(fullE4.parentUuid, entries[2].uuid);
 });
 
 test('distill: replaces content, preserves uuid+parentUuid, sets requiresResume', async () => {

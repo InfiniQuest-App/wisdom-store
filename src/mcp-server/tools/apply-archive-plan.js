@@ -314,10 +314,20 @@ export async function handleApplyArchivePlan(args = {}) {
     replaceMap.set(u, { ...fullEntry, parentUuid: reparent.get(u) });
   }
 
-  // Apply via shared utility.
+  // Default to orphan-style drops: dropped entries stay in file (preserved as
+  // history; can be inspected via inspect_pruned_messages later), but surviving
+  // descendants' parentUuids are rewritten past them via the reparenting cascade.
+  // For physical-remove behavior (smaller file), pass orphan_drops: false —
+  // though for file-size cleanup sandwich_prune is the better-suited tool.
+  const orphanDrops = args.orphan_drops !== false;
+
+  // Apply via shared utility. In orphan mode, don't pass drop set; reparenting
+  // alone is enough to make dropped entries unreachable from any chain walk.
   let stats;
   try {
-    stats = rewriteJsonl(filePath, { drop: droppedUuids, replace: replaceMap });
+    stats = rewriteJsonl(filePath, orphanDrops
+      ? { replace: replaceMap }
+      : { drop: droppedUuids, replace: replaceMap });
   } catch (e) {
     return {
       content: [{
@@ -343,12 +353,14 @@ export async function handleApplyArchivePlan(args = {}) {
     `**Backup**: \`${backupPath}\``,
     prunedOldBackups.length ? `**Pruned old backups**: ${prunedOldBackups.length} (kept last ${BACKUP_RETENTION})` : '',
     ``,
+    `**Drop mode**: ${orphanDrops ? 'orphan (entries stay in file, unreachable from chain walks; inspectable via inspect_pruned_messages; reversible by re-linking parentUuids)' : 'physical remove (entries deleted from file; reversible only via backup restore)'}`,
+    ``,
     `**Applied entries**: ${plan.entries.length}`,
-    `- Dropped: ${dropped} (actually removed: ${stats.droppedActual})`,
+    `- Dropped: ${dropped}${orphanDrops ? ' (orphaned, in file)' : ` (actually removed: ${stats.droppedActual})`}`,
     `- Distilled: ${distilled}`,
     `- Reparented (parent was dropped): ${reparent.size}`,
     ``,
-    `**File size**: ${(stats.sizeBefore / 1024).toFixed(0)} KB → ${(stats.sizeAfter / 1024).toFixed(0)} KB (${reductionPct}% reduction)`,
+    `**File size**: ${(stats.sizeBefore / 1024).toFixed(0)} KB → ${(stats.sizeAfter / 1024).toFixed(0)} KB (${reductionPct}% reduction${orphanDrops ? ' — orphan mode preserves dropped entries on disk; size delta is from reparenting + distill replacements only' : ''})`,
     ``,
     `**Requires /resume**: ${requiresResume ? 'YES (distillations changed visible content of kept entries)' : 'no (drops are hot-trim safe — Claude Code re-walks the chain each turn)'}`,
   ].filter(l => l !== '').join('\n');
@@ -357,7 +369,8 @@ export async function handleApplyArchivePlan(args = {}) {
     content: [{ type: 'text', text: report }],
     structuredContent: {
       applied: plan.entries.length,
-      dropped: stats.droppedActual,
+      dropped: orphanDrops ? droppedUuids.size : stats.droppedActual,
+      droppedMode: orphanDrops ? 'orphan' : 'physical-remove',
       distilled,
       bytesBefore: stats.sizeBefore,
       bytesAfter: stats.sizeAfter,

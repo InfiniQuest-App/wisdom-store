@@ -578,6 +578,11 @@ const TOOLS = [
         confirm: {
           type: 'boolean',
           description: 'Must be explicitly true to proceed. This is destructive (mutates the JSONL); the explicit confirm prevents accidental application.'
+        },
+        orphan_drops: {
+          type: 'boolean',
+          description: 'Default true. When true, drop actions ORPHAN entries (stay in file, unreachable from chain walks; inspectable via inspect_pruned_messages; trivially reversible by re-linking parentUuids). When false, drops physically remove entries from the file. Per-conversation context window is identical either way; orphan mode preserves history on disk. For active file-size cleanup, sandwich_prune is the better-suited tool.',
+          default: true
         }
       },
       required: ['planId', 'checksum', 'confirm']
