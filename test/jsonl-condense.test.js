@@ -135,7 +135,8 @@ test('buildCondensePlan: thinking mode condenses old thinking blocks via Pass 1 
     modes: ['thinking'],
     plan: fakePlan,
     turnsByEntryUuid,
-    totalTurns: 100
+    totalTurns: 100,
+    thinkingMarkerStyle: 'verbose'  // explicit verbose to verify the embedded-summary path
   });
   assert.equal(stats.thinkingCondensed, 1);
   assert.ok(stats.thinkingBytesSaved >= 2000);
@@ -144,6 +145,34 @@ test('buildCondensePlan: thinking mode condenses old thinking blocks via Pass 1 
   assert.equal(newContent[0].type, 'text', 'thinking block converted to text');
   assert.ok(newContent[0].text.includes('turn outcome:'));
   assert.ok(newContent[0].text.includes('Decided to refactor auth'));
+});
+
+test('buildCondensePlan: thinking mode DEFAULT marker is minimal (empirical body-token win)', () => {
+  const longThinking = 'A'.repeat(2000);
+  const chain = [
+    { uuid: 'u1', fullEntry: { uuid: 'u1', message: { content: [
+      { type: 'thinking', thinking: longThinking },
+      { type: 'text', text: 'agent reply text' }
+    ]}}}
+  ];
+  const turnsByEntryUuid = new Map([['u1', { turn_id: 1, totalTurns: 100 }]]);
+  const fakePlan = {
+    pass1: { summaries: [{ turn_id: 1, summary: 'Decided to refactor auth', importance: 'load_bearing' }] },
+    pass2: { turnDecisions: [] }
+  };
+  // No thinkingMarkerStyle passed → should default to 'minimal'
+  const { replace } = buildCondensePlan(chain, {
+    modes: ['thinking'],
+    plan: fakePlan,
+    turnsByEntryUuid,
+    totalTurns: 100
+  });
+  const newContent = replace.get('u1').message.content;
+  assert.equal(newContent[0].type, 'text');
+  assert.equal(newContent[0].text, '[thinking elided]', 'minimal marker should be exact');
+  // Verbose-only fields should NOT appear
+  assert.ok(!newContent[0].text.includes('turn outcome'));
+  assert.ok(!newContent[0].text.includes('KB'));
 });
 
 test('buildCondensePlan: thinking mode falls back to heuristic when no plan summary for that turn', () => {
@@ -158,7 +187,8 @@ test('buildCondensePlan: thinking mode falls back to heuristic when no plan summ
   const { replace, stats } = buildCondensePlan(chain, {
     modes: ['thinking'],
     turnsByEntryUuid,
-    totalTurns: 100
+    totalTurns: 100,
+    thinkingMarkerStyle: 'verbose'  // explicit verbose so the heuristic-last-paragraph text is included
   });
   assert.equal(stats.thinkingCondensed, 1);
   assert.equal(stats.thinkingFallbackUsed, 1);

@@ -97,7 +97,7 @@ export async function handleCondenseJsonlBlocks(args = {}) {
     const lastUuid = chain[chain.length - 1].data.uuid;
     planUsed = findMatchingV2Plan(filePath, chain.length, lastUuid);
     usingThinkingFallback = !planUsed;
-    extraOpts = { plan: planUsed, turnsByEntryUuid, totalTurns: turns.length };
+    extraOpts = { plan: planUsed, turnsByEntryUuid, totalTurns: turns.length, thinkingMarkerStyle: args.thinking_marker_style || 'minimal' };
   }
 
   const { replace, stats } = buildCondensePlan(chainFullEntries, { modes, ...extraOpts });

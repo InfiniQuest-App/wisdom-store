@@ -537,6 +537,11 @@ const TOOLS = [
           type: 'boolean',
           description: 'Default false. Refuses without OAuth unless explicitly opted into ANTHROPIC_API_KEY (no surprise charges).',
           default: false
+        },
+        aggressive: {
+          type: 'boolean',
+          description: 'Default false. When true, Pass 2 uses an aggressive archival prompt (target ~50% chain reduction; drops more turns; distills more readily; keeps only most-recent ~20 turns + load-bearing latest decisions). Use when the user has explicitly accepted information loss in exchange for context savings.',
+          default: false
         }
       }
     }
@@ -557,6 +562,12 @@ const TOOLS = [
           type: 'array',
           items: { type: 'string', enum: ['images', 'memory-reads', 'identical-reads', 'thinking'] },
           description: 'Which heuristics to apply. Default all (images, memory-reads, identical-reads, thinking). images=base64 image content; memory-reads=older reads of MEMORY.md/CLAUDE.md/.wisdom/*; identical-reads=older reads with byte-identical content; thinking=condense thinking blocks in older turns (uses v2 plan summaries when available, else heuristic last-paragraph fallback).'
+        },
+        thinking_marker_style: {
+          type: 'string',
+          enum: ['minimal', 'verbose'],
+          description: 'How to mark a condensed thinking block. Default "minimal" = single short marker like "[thinking elided]" — empirical evidence on loop168 shows verbose markers added ~17K body tokens across 234 condensations (Pass 1 summary embedded in marker). "verbose" = "[thinking elided ~3 KB; turn outcome: <Pass 1 summary>]" — useful only if you plan to read the JSONL manually.',
+          default: 'minimal'
         }
       }
     }

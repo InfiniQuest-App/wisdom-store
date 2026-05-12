@@ -133,7 +133,12 @@ function extractLastParagraph(text) {
   return trimmed.slice(-500); // last 500 chars as last-resort
 }
 
-function thinkingMarker({ originalLength, source, summary }) {
+// Default minimal marker — keeps body-token cost near zero. Empirical evidence
+// from loop168: verbose markers (Pass 1 summary embedded) added ~17K body tokens
+// across 234 condensations. The model can re-derive the turn outcome from its own
+// actions in the same turn; the marker doesn't need to repeat that.
+function thinkingMarker({ originalLength, source, summary, style = 'minimal' }) {
+  if (style === 'minimal') return '[thinking elided]';
   const sizeKb = (originalLength / 1024).toFixed(1);
   if (source === 'pass1') {
     return `[thinking elided ~${sizeKb} KB; turn outcome: ${summary}]`;
@@ -301,6 +306,7 @@ export function buildCondensePlan(chainFullEntries, opts = {}) {
   // to function fully (otherwise pure heuristic fallback per-block, no turn ctx).
   if (modes.has('thinking')) {
     const plan = opts.plan || null;
+    const markerStyle = opts.thinkingMarkerStyle || 'minimal';  // default minimal — empirical body-token win
     const summariesByTurn = plan ? pass1SummariesByTurn(plan) : new Map();
     const droppedTurns = plan ? pass2DroppedTurnIds(plan) : new Set();
     const turnsByEntryUuid = opts.turnsByEntryUuid || new Map();  // uuid → {turn_id, totalTurns}
@@ -348,7 +354,7 @@ export function buildCondensePlan(chainFullEntries, opts = {}) {
           source = 'signature-only-no-plan';
           stats.thinkingFallbackUsed++;
         }
-        const marker = thinkingMarker({ originalLength: totalLen, source, summary });
+        const marker = thinkingMarker({ originalLength: totalLen, source, summary, style: markerStyle });
         modified = true;
         stats.thinkingCondensed++;
         stats.thinkingBytesSaved += totalLen;
