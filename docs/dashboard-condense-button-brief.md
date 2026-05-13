@@ -640,3 +640,146 @@ All POST endpoints shell out to a tiny Node wrapper that imports the relevant to
 - ◐ mid — agent's record of past actions becomes shorter; structural info preserved
 - ◑ unknown — empirical effect measurable but qualitative impact untested
 
+
+---
+
+# Pre-bundled Strategies (replaces "Conservative / All 8 / Aggressive" presets)
+
+**Use case-named** so users pick by intent, not by mode-counting. Each preset is a complete configuration.
+
+## Strategy 1: 🛡️ Safe & Free
+**For:** any session, any time. Zero risk, zero cost, fully reversible.
+- **Modes:** `images`, `memory-reads`, `identical-reads`, `stale-reads`, `mcp-snapshots` (5 zero-risk modes)
+- **LLM:** ❌ none
+- **Cost:** $0
+- **Typical impact:** 2–10% AC reduction
+- **What it WON'T touch:** thinking blocks, agent text, tool inputs, mutation tool args
+- **When to use:** routine cleanup; first time on any session; if you're nervous about content loss
+
+## Strategy 2: ⚖️ Default (recommended)
+**For:** any session that's getting heavy. All heuristic, balanced risk.
+- **Modes:** all 8
+- **LLM:** ❌ none
+- **Cost:** $0
+- **Typical impact:** 15–30% file shrink, 10–25% AC reduction
+- **What it touches:** safe modes + thinking signatures + verbose tool inputs + tool_result summaries
+- **Quirks to know:** thinking signature impact on model continuation quality is empirically un-tested; agent's record of past tool inputs becomes preview+pointer (structural fields preserved)
+- **When to use:** when AC is approaching auto-compact and you want significant headroom without LLM cost
+
+## Strategy 3: 🧠 Deep (LLM-assisted, ~$0.50)
+**For:** sessions where you want semantic per-turn judgment, not just heuristic.
+- **Heuristic pass:** all 8 modes first (free)
+- **LLM pass:** then run `analyze_for_archive` (Haiku, ~$0.50) to identify droppable/distillable turns
+- **Apply:** `apply_archive_plan` with score thresholds (default `min_keep_score=86, min_distill_score=31`)
+- **LLM:** ✓ Haiku purpose pre-pass + Pass 1 per-turn classification + Pass 2 cross-turn judgment
+- **Cost:** ~$0.50–0.75 (Haiku rate budget; doesn't compete with active Sonnet sessions)
+- **Typical impact:** 30–50% AC reduction (combined with the heuristic pre-pass)
+- **When to use:** session is past the heuristic-only floor (40-60% AC after Default) AND you want to push lower without breaking continuity; OR you want semantic-aware drops (Pass 2 catches duplicate decisions / superseded planning that pure heuristic misses)
+
+**Default selection in the dashboard:** **Strategy 2 (Default).** Power users can change.
+
+---
+
+# LLM vs Heuristic at a Glance
+
+Every mode is tagged with a `🧠` (LLM) or `🔧` (heuristic) icon in the Configure tab:
+
+| Mode | Type | Per-block LLM cost |
+|---|---|---|
+| `images` | 🔧 heuristic | $0 |
+| `memory-reads` | 🔧 heuristic | $0 |
+| `identical-reads` | 🔧 heuristic | $0 |
+| `stale-reads` | 🔧 heuristic | $0 |
+| `mcp-snapshots` | 🔧 heuristic | $0 |
+| `refetch-markers` | 🔧 heuristic (optionally pulls Pass 1 summary if v2 plan exists for richer marker text — but only reads, no LLM call from this mode) | $0 |
+| `tool-args` | 🔧 heuristic | $0 |
+| `thinking` | 🔧 heuristic (optionally pulls Pass 1 summary if `thinking_marker_style: verbose` AND v2 plan exists — same: read-only, no LLM call) | $0 |
+
+**`condense_jsonl_blocks` is 100% heuristic.** No LLM calls. Ever.
+
+The LLM-assisted pipeline is **separate**:
+- 🧠 `analyze_for_archive` — uses Haiku for purpose pre-pass + Pass 1 classification + Pass 2 judgment. Costs ~$0.50/run.
+- 🔧 `apply_archive_plan` — heuristic execution of an analyze plan. $0.
+
+**In the widget UI:** put a small "🔧 zero LLM" badge on Tabs 1 + 2, and "🧠 uses LLM" badge on Tab 3.
+
+---
+
+# Empirical Results by Session Profile
+
+Real measurements from today's testing, with recommended strategy per profile.
+
+## Orchestrator profile (e.g., loop168 — orch-009)
+**Characteristics:** lots of `send_message` (220 KB), `text/assistant` (227 KB), coordination MCP calls, fewer giant tool_results.
+
+**Heuristic mode breakdown (loop168 baseline 101% AC):**
+- `images` alone: -9% AC (2 screenshots removed)
+- `memory-reads` alone: ~0% (rounding; few memory reads in active chain)
+- `thinking` alone: **-16% AC** (biggest single win — 234 thinking blocks)
+- `mcp-snapshots`: -1%
+- `refetch-markers`: -5%
+
+**Strategy 2 (Default heuristic) total: ~−25% AC** → from 101% to 76% AC
+
+**Strategy 3 (Deep) added: ~−8% more** → from 76% to 68% AC
+
+**Recommendation for orchestrators: Strategy 3 if AC > 75%; Strategy 2 if AC < 60% and you just want headroom.**
+
+**What was weak:** the 220 KB of `send_message` tool_use INPUTS is the biggest unaddressed chunk on orchestrators. Heuristic `tool-args` doesn't touch those (mutation tools, message text not re-fetchable). Best handled via LLM-assisted apply with aggressive Pass 2 (orphans coordination-heavy turns; agent can fetch via inspect_pruned_messages).
+
+## Worker profile (e.g., loop151 — Computers_Plus_Repair)
+**Characteristics:** lots of `thinking` (286 KB pre-condense), `tool_result:Read` (217 KB), `tool_result:Bash` (165 KB), MCP DB queries. Few `send_message` (workers don't initiate coordination).
+
+**Heuristic mode breakdown (loop151 baseline 66% AC):**
+- `thinking` + `refetch-markers` + `mcp-snapshots` together: **-14% AC** (combined, individual contributions un-isolated)
+- Strategy 2 (Default heuristic) total: **−14% AC** → from 66% to 52% AC
+
+**The 4 extensions** (db_query whitelist, Edit/Write to tool-args + refetch, lower threshold) added ~0% AC marginal on already-condensed loop151 but should pick up edge cases on FRESH worker sessions.
+
+**Recommendation for workers: Strategy 2 alone is usually enough.** Strategy 3 adds marginal value for workers — their content is mostly tool_results already covered by heuristic refetch-markers.
+
+**What was weak:** for workers with very few turns (loop151 has 17 turns), the recent-N adaptive cap (`min(30, ceil(totalTurns/2))`) keeps a high fraction of turns verbatim. So less is condensable. Tune `keep_recent_turns` lower if you want more aggressive worker condensation.
+
+## Investigator profile (e.g., a worker spawned for read-only research, like loop171 was)
+**Characteristics:** mostly `tool_result:Read`, very few edits, lots of file content captured.
+
+**Strategy 2 should hit hard via `refetch-markers`** (re-fetching is exactly what investigators can do — re-Read a file for current state).
+
+**Recommendation: Strategy 2.**
+
+## Light worker / short session (< 50 turns)
+**Characteristics:** small chain, mostly recent turns are "active state."
+
+**Default `keep_recent_turns = ceil(totalTurns/2)` will skip half the chain.** Result: only modest condensation.
+
+**Recommendation: Strategy 1 (Safe & Free) is enough.** Strategy 2 won't find much extra to do without overriding `keep_recent_turns`.
+
+## Heavy investigator with images (e.g., mobile UI debugging session)
+**Characteristics:** lots of screenshots embedded as `Read` of `.png`/`.jpg` files.
+
+**`images` mode alone is the killer feature** — base64 image bytes can be 100+ KB each.
+
+**Recommendation: Strategy 1 OR Strategy 2; either captures images.**
+
+## Untested profiles (worth measuring next)
+- **Long investigator session at full-context** (1000+ turns) — does the adaptive `keep_recent_turns` floor (capped at 30) preserve enough recency?
+- **Sessions with extended-thinking explicitly used by Mike post-condense** — does removing thinking signatures actually degrade subsequent extended-thinking quality? (Mike's "fingerprint / weights / private language" hypothesis untested in practice.)
+- **Sessions across model switches** (Opus ↔ Sonnet ↔ Haiku) — do thinking signatures transfer between models at all?
+
+---
+
+# Strategy selector UI in the Configure tab
+
+Replace the existing 3-button row with this radio-group:
+
+```
+Strategy:  ( ) 🛡️ Safe & Free      ── 5 zero-risk modes, no LLM
+           (•) ⚖️ Default            ── all 8 heuristic modes (recommended)
+           ( ) 🧠 Deep (LLM-assisted) ── adds ~$0.50 Haiku pass for semantic judgment
+
+         Or [Customize modes ▾] for manual selection
+```
+
+Selecting a strategy auto-toggles the appropriate modes in the checkbox list (which becomes read-only unless "Customize" is clicked). "Customize" reveals all 8 mode toggles + advanced args.
+
+For the LLM-assisted Strategy 3 selection, the "APPLY CONFIGURATION" button changes label to "RUN HEURISTIC + ANALYZE + APPLY" to make the multi-step nature obvious, and shows the estimated cost ($0.50–$0.75) before clicking.
