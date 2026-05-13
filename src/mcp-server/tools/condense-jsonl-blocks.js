@@ -32,6 +32,8 @@ import { rewriteJsonl } from '../lib/jsonl-mutate.js';
 import { buildCondensePlan, findMatchingV2Plan } from '../lib/jsonl-condense.js';
 import { segmentTurns } from '../lib/turn-segmenter.js';
 import { loadCondenseMeta, saveCondenseMeta, markBlockCondensed, summarizeMeta } from '../lib/condense-meta.js';
+import { summarizeBlocksConcurrent } from '../lib/refetch-summarizer.js';
+import { getAnthropicClient } from '../lib/anthropic-client.js';
 
 const VALID_MODES = new Set(['images', 'memory-reads', 'identical-reads', 'thinking', 'stale-reads', 'mcp-snapshots', 'refetch-markers', 'tool-args']);
 const BACKUP_RETENTION = 3;
@@ -58,7 +60,7 @@ export async function handleCondenseJsonlBlocks(args = {}) {
   // would silently pick the most-recently-modified, which can be the wrong file).
   let filePath;
   if (args.jsonl_path) {
-    if (!require('fs').existsSync(args.jsonl_path)) {
+    if (!fs.existsSync(args.jsonl_path)) {
       return { content: [{ type: 'text', text: `jsonl_path does not exist: ${args.jsonl_path}` }], isError: true };
     }
     filePath = args.jsonl_path;
@@ -94,6 +96,67 @@ export async function handleCondenseJsonlBlocks(args = {}) {
     fullEntry: readJsonlLine(filePath, e.line) || e.data
   }));
 
+  // LLM-summary pre-pass (when summarize_with_llm: true AND refetch-markers in modes)
+  // Builds a uuid:blockIdx → summary map to pass into buildCondensePlan.
+  let refetchSummariesByUuid = null;
+  let llmSummaryCost = null;
+  let llmSummaryUsage = null;
+  if (args.summarize_with_llm === true && modes.includes('refetch-markers')) {
+    const fs = await import('fs');
+    // Walk chain to find candidate blocks (eligible refetch tools, content >= MIN_BYTES, not in sidecar)
+    const REFETCH_MIN_BYTES = 600; // mirror the lib constant
+    const candidates = []; // {uuid, blockIdx, toolName, toolArgs, content}
+    for (let i = 0; i < chainFullEntries.length; i++) {
+      const entry = chainFullEntries[i].fullEntry;
+      const c = entry?.message?.content;
+      if (!Array.isArray(c)) continue;
+      for (const block of c) {
+        if (block?.type !== 'tool_use') continue;
+        const tuId = block.id;
+        for (let j = i + 1; j < Math.min(i + 5, chainFullEntries.length); j++) {
+          const next = chainFullEntries[j].fullEntry;
+          const nc = next?.message?.content;
+          if (!Array.isArray(nc)) continue;
+          for (let bIdx = 0; bIdx < nc.length; bIdx++) {
+            const nb = nc[bIdx];
+            if (nb?.type !== 'tool_result' || nb.tool_use_id !== tuId) continue;
+            let txt = '';
+            if (typeof nb.content === 'string') txt = nb.content;
+            else if (Array.isArray(nb.content)) for (const cb of nb.content) {
+              if (cb?.type === 'text') txt += cb.text || '';
+            }
+            const targetUuid = chainFullEntries[j].uuid;
+            // Skip already-condensed blocks (sidecar)
+            const sidecarBlock = sidecar?.entries?.[targetUuid]?.blocks?.[String(bIdx)];
+            if (sidecarBlock) continue;
+            if (txt.length < REFETCH_MIN_BYTES) continue;
+            candidates.push({ uuid: targetUuid, blockIdx: bIdx, toolName: block.name, toolArgs: block.input, content: txt });
+            break;
+          }
+        }
+      }
+    }
+    if (candidates.length > 0) {
+      const { client } = getAnthropicClient();
+      console.error(`[condense] Summarizing ${candidates.length} blocks via Haiku (cached system prompt)...`);
+      const t0 = Date.now();
+      const sumResult = await summarizeBlocksConcurrent(client, candidates, { concurrency: 5 });
+      const elapsed = ((Date.now() - t0) / 1000).toFixed(1);
+      refetchSummariesByUuid = new Map();
+      for (let k = 0; k < candidates.length; k++) {
+        const c = candidates[k];
+        const r = sumResult.results[k];
+        if (r?.summary) refetchSummariesByUuid.set(c.uuid + ':' + c.blockIdx, r.summary);
+      }
+      llmSummaryUsage = sumResult.usage;
+      const totalCost = ((sumResult.usage.input_tokens / 1_000_000) * 0.80) +
+                        ((sumResult.usage.output_tokens / 1_000_000) * 4.00) +
+                        ((sumResult.usage.cache_read_input_tokens / 1_000_000) * 0.08) +
+                        ((sumResult.usage.cache_creation_input_tokens / 1_000_000) * 1.00);
+      llmSummaryCost = `$${totalCost.toFixed(4)} for ${candidates.length} blocks in ${elapsed}s (cached: ${sumResult.usage.cache_read_input_tokens.toLocaleString()} read tokens, ${sumResult.usage.cache_creation_input_tokens.toLocaleString()} write tokens)`;
+    }
+  }
+
   // For "thinking" mode, build turn segmentation + look up most recent v2 plan.
   let extraOpts = {};
   let planUsed = null;
@@ -109,7 +172,7 @@ export async function handleCondenseJsonlBlocks(args = {}) {
     const lastUuid = chain[chain.length - 1].data.uuid;
     planUsed = findMatchingV2Plan(filePath, chain.length, lastUuid);
     usingThinkingFallback = !planUsed;
-    extraOpts = { plan: planUsed, turnsByEntryUuid, totalTurns: turns.length, thinkingMarkerStyle: args.thinking_marker_style || 'minimal', keepRecentTurns: args.keep_recent_turns };
+    extraOpts = { plan: planUsed, turnsByEntryUuid, totalTurns: turns.length, thinkingMarkerStyle: args.thinking_marker_style || 'minimal', keepRecentTurns: args.keep_recent_turns, refetchSummariesByUuid };
   }
 
   const sidecar = loadCondenseMeta(filePath);
@@ -136,7 +199,7 @@ export async function handleCondenseJsonlBlocks(args = {}) {
     `- Identical-content reads: ${stats.identicalReadsCondensed} blocks, ~${(stats.identicalReadsBytesSaved/1024).toFixed(0)} KB`,
     `- Stale reads (same path/args, older superseded): ${stats.staleReadsCondensed || 0} blocks, ~${((stats.staleReadsBytesSaved||0)/1024).toFixed(0)} KB`,
     `- MCP status snapshots (older superseded): ${stats.mcpSnapshotsCondensed || 0} blocks, ~${((stats.mcpSnapshotsBytesSaved||0)/1024).toFixed(0)} KB`,
-    `- Re-fetch markers (Read/Bash/MCP queries → summary+pointer): ${stats.refetchMarkersCondensed || 0} blocks, ~${((stats.refetchMarkersBytesSaved||0)/1024).toFixed(0)} KB`,
+    `- Re-fetch markers (Read/Bash/MCP queries → summary+pointer): ${stats.refetchMarkersCondensed || 0} blocks, ~${((stats.refetchMarkersBytesSaved||0)/1024).toFixed(0)} KB${llmSummaryCost ? ` [LLM summaries: ${llmSummaryCost}]` : ''}`,
     `- Tool-args (verbose tool_use INPUT fields → preview+pointer): ${stats.toolArgsCondensed || 0} blocks, ~${((stats.toolArgsBytesSaved||0)/1024).toFixed(0)} KB`,
     modes.includes('thinking') ? `- Thinking blocks: ${stats.thinkingCondensed || 0} blocks, ~${((stats.thinkingBytesSaved||0)/1024).toFixed(0)} KB${usingThinkingFallback ? ' ⚠️ (heuristic last-paragraph fallback — no v2 plan found)' : ` (using v2 plan ${planUsed?.planId?.slice(0,8) || ''}...)`}` : '',
     `- **Total**: ${totalCondensed} blocks, ~${(totalBytesSaved/1024).toFixed(0)} KB raw content (file size will drop less due to JSON overhead)`,

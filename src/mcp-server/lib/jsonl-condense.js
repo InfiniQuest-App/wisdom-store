@@ -19,6 +19,7 @@
 
 import fs from 'fs';
 import path from 'path';
+import { heuristicSectionSummary } from './refetch-summarizer.js';
 
 const MEMORY_FILE_PATTERNS = [
   /\/MEMORY\.md$/i,
@@ -145,13 +146,23 @@ function isMemoryStylePath(fp) {
   return MEMORY_FILE_PATTERNS.some(re => re.test(fp));
 }
 
-function refetchMarker({ toolName, toolArgs, contentText, contentLen, pass1TurnSummary }) {
-  const head = contentText.slice(0, REFETCH_HEAD_CHARS);
-  const tail = contentLen > (REFETCH_HEAD_CHARS + REFETCH_TAIL_CHARS + 100)
-    ? contentText.slice(-REFETCH_TAIL_CHARS)
-    : '';
+function refetchMarker({ toolName, toolArgs, contentText, contentLen, pass1TurnSummary, llmSummary }) {
   const lineCount = contentText.split('\n').length;
-  const elidedLen = contentLen - head.length - tail.length;
+  // Choose the best available summary, in priority order:
+  //   1. LLM summary (Haiku, when summarize_with_llm enabled)
+  //   2. Pass 1 turn-outcome summary (when v2 plan available)
+  //   3. Heuristic section summary (free, content-aware via double-newline split)
+  let summarySource, summaryText;
+  if (llmSummary) {
+    summarySource = 'Haiku';
+    summaryText = llmSummary;
+  } else if (pass1TurnSummary) {
+    summarySource = 'analyze-v2 Pass 1 turn outcome';
+    summaryText = pass1TurnSummary;
+  } else {
+    summarySource = 'heuristic (first line of each section split by blank lines)';
+    summaryText = heuristicSectionSummary(contentText) || '(no clear sections — content was a single block)';
+  }
 
   // Re-fetch pointer based on tool type
   let refetchInstr;
@@ -170,25 +181,16 @@ function refetchMarker({ toolName, toolArgs, contentText, contentLen, pass1TurnS
   }
 
   const summaryParts = [
-    `[${toolName} tool_result elided — ~${(contentLen/1024).toFixed(1)} KB, ${lineCount} lines]`
-  ];
-  // Optional Pass 1 turn summary — higher quality context than raw head/tail.
-  if (pass1TurnSummary) {
-    summaryParts.push(``, `TURN OUTCOME (from analyze v2 Pass 1):`, `  ${pass1TurnSummary}`);
-  }
-  // Always include head+tail as procedural backup — Pass 1 summary captures the
-  // turn's overall outcome but the raw content head shows the actual data shape.
-  summaryParts.push(``, `RAW CONTENT (first ${head.length} chars):`, head);
-  if (tail) {
-    summaryParts.push(``, `... [${elidedLen} chars elided] ...`, ``, `(last ${tail.length} chars):`, tail);
-  }
-  summaryParts.push(
+    `[${toolName} tool_result elided — ~${(contentLen/1024).toFixed(1)} KB, ${lineCount} lines]`,
     ``,
-    `RE-FETCH for full current content:`,
+    `SUMMARY (${summarySource}):`,
+    summaryText.split('\n').map(l => '  ' + l).join('\n'),
+    ``,
+    `RE-FETCH for full original content:`,
     `  ${refetchInstr}`,
     ``,
-    `Why elided: tool_result was older than the most-recent ${REFETCH_KEEP_RECENT_TURNS}-turn active state and ≥${REFETCH_MIN_BYTES} bytes; condensed to summary+pointer. Original preserved in .condense-backups/.`
-  );
+    `Why elided: tool_result was older than the most-recent active-state buffer and ≥${REFETCH_MIN_BYTES} bytes; condensed to summary+pointer. Original preserved in .condense-backups/.`
+  ];
   return summaryParts.join('\n');
 }
 
@@ -683,12 +685,14 @@ export function buildCondensePlan(chainFullEntries, opts = {}) {
             const pass1TurnSummary = (turn_id != null && opts.plan)
               ? pass1SummariesByTurn(opts.plan).get(turn_id)
               : null;
+            const llmSummary = opts.refetchSummariesByUuid?.get(targetUuid + ':' + bIdx) || null;
             const marker = refetchMarker({
               toolName: block.name,
               toolArgs: block.input,
               contentText: txt,
               contentLen: txt.length,
-              pass1TurnSummary
+              pass1TurnSummary,
+              llmSummary
             });
 
             const target = chainFullEntries[j].fullEntry;

@@ -576,8 +576,13 @@ const TOOLS = [
         thinking_marker_style: {
           type: 'string',
           enum: ['minimal', 'verbose'],
-          description: 'How to mark a condensed thinking block. Default "minimal" = single short marker like "[thinking elided]" — empirical evidence on loop168 shows verbose markers added ~17K body tokens across 234 condensations (Pass 1 summary embedded in marker). "verbose" = "[thinking elided ~3 KB; turn outcome: <Pass 1 summary>]" — useful only if you plan to read the JSONL manually.',
+          description: 'How to mark a condensed thinking block. Default "minimal" = single short marker like "[thinking elided]" — empirical evidence on loop168 shows verbose markers added ~17K body tokens across 234 condensations. "verbose" = embed Pass 1 turn summary if a v2 plan exists.',
           default: 'minimal'
+        },
+        summarize_with_llm: {
+          type: 'boolean',
+          description: 'When true, runs a Haiku pre-pass to generate per-block summaries for refetch-markers mode. Cached system prompt amortizes cost across blocks (~$0.001/block; ~$0.05-0.15 per typical session). Falls back to heuristic section-summary on individual call failures. Recommended for sessions where the agent will need to act on elided content without re-fetching.',
+          default: false
         }
       }
     }
