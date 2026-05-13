@@ -51,7 +51,7 @@ const STALE_READ_MIN_BYTES = 500;    // don't bother for tiny reads
 
 // Re-fetch marker mode: summarize tool_result content with head + tail + re-fetch pointer.
 // Threshold: only condense tool_results above this size — not worth the marker overhead otherwise.
-const REFETCH_MIN_BYTES = 1500;
+const REFETCH_MIN_BYTES = 600;  // lowered from 1500 to catch numerous small Bash/Read results that add up
 const REFETCH_HEAD_CHARS = 400;
 const REFETCH_TAIL_CHARS = 100;
 
@@ -59,6 +59,12 @@ const REFETCH_TAIL_CHARS = 100;
 // Tool_results from mutation tools are excluded — re-running is unsafe.
 const REFETCH_ELIGIBLE_TOOLS = new Set([
   'Read', 'Bash', 'Grep', 'Glob', 'WebFetch', 'WebSearch',
+  // Mutation tools whose tool_RESULT (not input) is re-fetchable via Read of the
+  // file — the result snapshot ages out as the file changes downstream.
+  'Edit', 'Write',
+  'mcp__codegen__manualFileEdit',
+  'mcp__codegen__manualFileWrite',
+  // Read-only MCP queries
   'mcp__orchestrator__get_suggestions',
   'mcp__orchestrator__get_session_info',
   'mcp__orchestrator__get_session_output',
@@ -71,7 +77,10 @@ const REFETCH_ELIGIBLE_TOOLS = new Set([
   'mcp__wisdom-store__get_wisdom',
   'mcp__wisdom-store__list_wisdom',
   'mcp__wisdom-store__get_project_overview',
-  'mcp__wisdom-store__context_status'
+  'mcp__wisdom-store__context_status',
+  // Idempotent-ish DB query tools (results may differ if data changed, but
+  // re-call gives current state — same semantics as MCP queries).
+  'mcp__cpr-api-proxy__db_query'
 ]);
 // Bash needs special caveat — re-running is technically possible but commands
 // can be side-effecting. Marker includes a "don't re-run unless you've checked
@@ -93,7 +102,14 @@ const TOOL_ARGS_PREVIEW_CHARS = 100;
 const TOOL_ARGS_FIELDS = {
   'TaskCreate': ['description'],
   'mcp__orchestrator__create_session': ['initialTask'],
-  'mcp__orchestrator__assign_task': ['task']
+  'mcp__orchestrator__assign_task': ['task'],
+  // File-edit tools — old_string/new_string are the diff content. Per Mike\'s
+  // guidance: diffs recoverable from git, OK to lose the bytes here. The
+  // file_path is preserved structurally; agent can re-Read for current state.
+  'Edit': ['old_string', 'new_string'],
+  'Write': ['content'],
+  'mcp__codegen__manualFileEdit': ['old_string', 'new_string'],
+  'mcp__codegen__manualFileWrite': ['content']
 };
 
 const IMAGE_EXT = /\.(png|jpe?g|gif|webp|bmp|svg|ico|tiff?)$/i;
@@ -143,6 +159,8 @@ function refetchMarker({ toolName, toolArgs, contentText, contentLen, pass1TurnS
     refetchInstr = `Read({file_path: ${JSON.stringify(toolArgs.file_path)}${toolArgs.offset ? `, offset: ${toolArgs.offset}` : ''}${toolArgs.limit ? `, limit: ${toolArgs.limit}` : ''}}) — gives current file state, not the historical snapshot`;
   } else if (toolName === 'Bash' && toolArgs?.command) {
     refetchInstr = `Bash({command: ${JSON.stringify(toolArgs.command)}}) — RE-RUN ONLY IF SAFE; some commands have side effects.`;
+  } else if (['Edit', 'Write', 'mcp__codegen__manualFileEdit', 'mcp__codegen__manualFileWrite'].includes(toolName) && toolArgs?.file_path) {
+    refetchInstr = `Read({file_path: ${JSON.stringify(toolArgs.file_path)}}) — gives the file's CURRENT state. The original tool_result was a snapshot at edit time; the live file may have changed since.`;
   } else if (toolName === 'Grep' && toolArgs?.pattern) {
     refetchInstr = `Grep with same args (pattern + path filters) for current matches`;
   } else if (toolName?.startsWith('mcp__')) {
