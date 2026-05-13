@@ -202,7 +202,7 @@ export async function handleCondenseJsonlBlocks(args = {}) {
     `- MCP status snapshots (older superseded): ${stats.mcpSnapshotsCondensed || 0} blocks, ~${((stats.mcpSnapshotsBytesSaved||0)/1024).toFixed(0)} KB`,
     `- Re-fetch markers (Read/Bash/MCP queries → summary+pointer): ${stats.refetchMarkersCondensed || 0} blocks, ~${((stats.refetchMarkersBytesSaved||0)/1024).toFixed(0)} KB${llmSummaryCost ? ` [LLM summaries: ${llmSummaryCost}]` : ''}`,
     `- Tool-args (verbose tool_use INPUT fields → preview+pointer): ${stats.toolArgsCondensed || 0} blocks, ~${((stats.toolArgsBytesSaved||0)/1024).toFixed(0)} KB`,
-    modes.includes('thinking') ? `- Thinking blocks: ${stats.thinkingCondensed || 0} blocks, ~${((stats.thinkingBytesSaved||0)/1024).toFixed(0)} KB${usingThinkingFallback ? ' ⚠️ (heuristic last-paragraph fallback — no v2 plan found)' : ` (using v2 plan ${planUsed?.planId?.slice(0,8) || ''}...)`}` : '',
+    modes.includes('thinking') ? `- Thinking blocks: ${stats.thinkingCondensed || 0} blocks, ~${((stats.thinkingBytesSaved||0)/1024).toFixed(0)} KB${usingThinkingFallback ? ' (no v2 plan — used heuristic source for summary text; this is normal for sessions without prior analyze runs)' : ` (using v2 plan ${planUsed?.planId?.slice(0,8) || ''}...)`}` : '',
     `- **Total**: ${totalCondensed} blocks, ~${(totalBytesSaved/1024).toFixed(0)} KB raw content (file size will drop less due to JSON overhead)`,
     ``
   ];

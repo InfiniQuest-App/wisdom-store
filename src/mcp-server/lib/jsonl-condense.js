@@ -637,11 +637,16 @@ export function buildCondensePlan(chainFullEntries, opts = {}) {
           summary = extractLastParagraph(block.thinking);
           source = 'heuristic-last-paragraph';
           stats.thinkingFallbackUsed++;
+          stats.thinkingNoPlanCount = (stats.thinkingNoPlanCount || 0) + 1;
         } else {
-          // No plan, no thinking text (signature-only block — Anthropic-encrypted thinking)
+          // No plan, no thinking text (signature-only block — Anthropic-encrypted thinking).
+          // This is the TYPICAL case: most thinking blocks on disk are signature-only
+          // (Anthropic stores the verification token, not the thinking text). Without
+          // a v2 plan, we use a stub marker. NOT an error — by design.
           summary = '(thinking content was encrypted by Anthropic — only the signature remained)';
           source = 'signature-only-no-plan';
           stats.thinkingFallbackUsed++;
+          stats.thinkingNoPlanCount = (stats.thinkingNoPlanCount || 0) + 1;
         }
         const marker = thinkingMarker({ originalLength: totalLen, source, summary, style: markerStyle });
         modified = true;
