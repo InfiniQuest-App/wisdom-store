@@ -272,3 +272,371 @@ If you want a richer interface (vs single button):
 - Current AC% (from Claude Code's footer if accessible; else from our `context_status` tool)
 - "Condense" quick-button + "Configure" link
 - Indicator badge if a recent backup or sidecar exists
+
+---
+
+# Full Widget Spec (for dashboard worker)
+
+This is the complete specification for a **"Smart Archival" control widget** that lives on each session's card or detail view. Implementation framework agnostic (React, plain DOM, etc.) — the worker decides how to render; this spec defines what the user sees, what each control does, and what happens behind it.
+
+## Header strip (always visible)
+
+```
+┌──────────────────────────────────────────────────────────────────────────────┐
+│  Smart Archival   ·   claude-loop120   ·   e47eaf10                          │
+│  Active chain: 1247 entries  |  ctx: 98% AC  |  file: 12.5 MB                │
+│  Last condense: never · Last backup: never                                   │
+└──────────────────────────────────────────────────────────────────────────────┘
+```
+
+**Data sources for header:**
+- Session friendly-name + UUID: from dashboard's session map
+- Active chain entries + file size: shell out to `node -e "import('mcp-server/lib/jsonl.js').then(...)"` OR call the existing `mcp__wisdom-store__context_status` tool which returns these
+- AC%: from Claude Code's footer cache if accessible; else show "—"
+- Last condense + last backup: from `<conv_dir>/.condense-log/<convId>.jsonl` (most recent entry's timestamp) and `<conv_dir>/.condense-backups/` directory listing (newest mtime)
+
+## Tab structure
+
+```
+┌─[ Quick Condense ]─[ Configure ]─[ LLM-Assisted ]─[ History ]──────┐
+│                                                                     │
+│  [tab content]                                                      │
+│                                                                     │
+└─────────────────────────────────────────────────────────────────────┘
+```
+
+---
+
+## Tab 1: Quick Condense (default tab)
+
+**Purpose:** one-click button. All 8 modes, defaults, no fuss.
+
+```
+┌──────────────────────────────────────────────────────────────┐
+│  Quick Condense                                              │
+├──────────────────────────────────────────────────────────────┤
+│                                                              │
+│   Runs all 8 heuristic modes with safe defaults.             │
+│   Zero LLM cost. Fully reversible. Idempotent.               │
+│                                                              │
+│   [ ] Dry run (preview only — no mutation)                   │
+│                                                              │
+│           ┌────────────────────────────┐                     │
+│           │   ⚡ CONDENSE NOW          │                     │
+│           └────────────────────────────┘                     │
+│                                                              │
+└──────────────────────────────────────────────────────────────┘
+```
+
+**Behavior:** clicking the button calls the backend with:
+```json
+{
+  "jsonl_path": "<conv_dir>/<convId>.jsonl",
+  "modes": ["images", "memory-reads", "identical-reads", "stale-reads",
+            "mcp-snapshots", "refetch-markers", "tool-args", "thinking"],
+  "thinking_marker_style": "minimal",
+  "dry_run": <checkbox state>
+}
+```
+
+**Result display (after success):**
+
+```
+┌──────────────────────────────────────────────────────────────┐
+│  ✓ Condense complete                                         │
+│                                                              │
+│   File: 12,541 KB → 9,832 KB  (-21.6%)                       │
+│   Blocks touched: 487                                        │
+│                                                              │
+│   ▸ thinking         145 blocks  ~287 KB                     │
+│   ▸ refetch-markers   84 blocks  ~225 KB                     │
+│   ▸ mcp-snapshots      7 blocks   ~41 KB                     │
+│   ▸ tool-args          4 blocks    ~8 KB                     │
+│   ▸ memory-reads       0 blocks    ~0 KB                     │
+│   ▸ images             0 blocks    ~0 KB                     │
+│   ▸ stale-reads        0 blocks    ~0 KB                     │
+│   ▸ identical-reads    0 blocks    ~0 KB                     │
+│                                                              │
+│   Backup: e47eaf10.1778625179591.jsonl                       │
+│   [Restore from backup]   [View report]                      │
+│                                                              │
+└──────────────────────────────────────────────────────────────┘
+```
+
+**Tooltip on the "Dry run" checkbox:**
+> "Preview what would be condensed without modifying the file. Recommended for the first run on any new session — confirms the tool finds something useful before committing."
+
+**Tooltip on the "CONDENSE NOW" button:**
+> "Runs all 8 condense modes against this conversation's JSONL. Produces a backup before mutating; safe to re-run (idempotent). The session sees the condensed file on its next turn — no /resume needed."
+
+---
+
+## Tab 2: Configure (advanced controls)
+
+**Purpose:** mode picker + per-mode parameters + advanced args. Power users can tune.
+
+```
+┌──────────────────────────────────────────────────────────────┐
+│  Configure Condense                                          │
+├──────────────────────────────────────────────────────────────┤
+│                                                              │
+│  Modes (8):                                                  │
+│                                                              │
+│   ☑ images                  Risk: ✓ none                     │
+│   ☑ memory-reads            Risk: ✓ none                     │
+│   ☑ identical-reads         Risk: ✓ none                     │
+│   ☑ stale-reads             Risk: ✓ none                     │
+│   ☑ mcp-snapshots           Risk: ✓ none                     │
+│   ☑ refetch-markers         Risk: ◐ low                      │
+│   ☑ tool-args               Risk: ◐ mid                      │
+│   ☑ thinking                Risk: ◑ unknown                  │
+│                                                              │
+│   [Conservative subset]  [All 8 (default)]  [Aggressive]     │
+│                                                              │
+├──────────────────────────────────────────────────────────────┤
+│  Thinking marker style:  ( ) minimal   ( ) verbose           │
+│                                                              │
+│  Keep recent N turns:  [ adaptive ]   [override ____]        │
+│                                                              │
+│  [ ] Dry run                                                 │
+│                                                              │
+│           ┌────────────────────────────┐                     │
+│           │   APPLY CONFIGURATION      │                     │
+│           └────────────────────────────┘                     │
+│                                                              │
+└──────────────────────────────────────────────────────────────┘
+```
+
+**Mode controls (8 checkboxes):**
+
+| Mode | Default | Tooltip |
+|---|---|---|
+| `images` | ☑ | "Replaces base64 image content in tool_results with `[image elided]` markers. Image still re-readable from its file path. Zero risk." |
+| `memory-reads` | ☑ | "Older reads of memory-style files (MEMORY.md, CLAUDE.md, .wisdom/*, plans/*.md) get replaced with markers. Always safe — agent can re-Read these files for current state." |
+| `identical-reads` | ☑ | "When the same file is read multiple times with byte-identical content, older copies become markers. Zero info loss — content was identical." |
+| `stale-reads` | ☑ | "Same path + same offset + same limit, multiple reads in chain order: older reads become markers. Strict args match — never confuses partial reads at different offsets." |
+| `mcp-snapshots` | ☑ | "Older copies of MCP status-snapshot tool_results (get_suggestions, get_session_info, list_workers, etc.) become markers — point-in-time data goes stale fast." |
+| `refetch-markers` | ☑ | "Tool_result content for read-only tools (Read, Bash, Grep, MCP queries) becomes a summary (head/tail) + re-fetch pointer. Agent re-calls the tool if it needs full content. Safe — tools are idempotent." |
+| `tool-args` | ☑ | "Verbose string fields in tool_use INPUTS for TaskCreate/Edit/Write/manualFileEdit/create_session/assign_task get a 100-char preview + pointer. Mid risk — agent's record of 'what I sent' becomes shorter; structural fields (file_path, subject) preserved." |
+| `thinking` | ☑ | "Thinking-block signatures get replaced with `[thinking elided]` markers. Big space savings (signatures are bulky). Unknown subtle risk — signatures might serve as continuation primer for the model; empirical AC% drops, but qualitative continuation quality is untested in extended-thinking sessions." |
+
+**Preset buttons:**
+- **Conservative subset** → enables only: images, memory-reads, identical-reads, stale-reads, mcp-snapshots (the 5 zero-risk modes)
+- **All 8 (default)** → enables everything
+- **Aggressive** → All 8 + lower the `keep_recent_turns` to `5` (override the adaptive default to be more aggressive on recency)
+
+**Thinking marker style (radio):**
+- **minimal** (default) → markers like `[thinking elided]` (~17 chars). Empirically validated, byte-efficient.
+- **verbose** → markers like `[thinking elided ~3 KB; turn outcome: <Pass 1 summary>]`. Only useful if an analyze-v2 plan exists for this session (otherwise falls back to a stub). ~150-500 chars per marker.
+
+**Tooltip on thinking marker style:**
+> "Minimal markers add minimal body weight — empirical evidence shows this is the right default. Verbose markers embed Pass 1 turn summaries from a prior analyze-v2 run — useful if you want the agent to see the per-turn semantic outcome without expanding the elided content. Switch to verbose only after running 'LLM-Assisted' analyze first."
+
+**Keep recent N turns (number with adaptive option):**
+- Default placeholder text: `adaptive` — uses `min(30, ceil(totalTurns/2))`
+- User can type a number to override
+- Validation: integer ≥ 0
+
+**Tooltip on keep recent N:**
+> "How many of the most recent turns to leave verbatim (active state). Default 'adaptive' = min(30, half of total turns). For long chains (>60 turns) that's 30. For short chains (e.g., 17 turns), it shrinks to ~9. Override with a specific integer if you want more or less recency preservation."
+
+**Apply configuration button:** sends all selected modes + style + recent-N override to the same backend endpoint.
+
+---
+
+## Tab 3: LLM-Assisted (analyze + apply pipeline)
+
+**Purpose:** richer condensation using Haiku to make per-turn semantic judgments. Costs ~$0.50/run on Haiku rate budget. Three-step wizard.
+
+```
+┌──────────────────────────────────────────────────────────────┐
+│  LLM-Assisted Archival                                       │
+├──────────────────────────────────────────────────────────────┤
+│                                                              │
+│  Step 1: Analyze (Haiku)                                     │
+│                                                              │
+│   Model:  ( ) Haiku 4.5 (default, cheap, separate budget)    │
+│           ( ) Sonnet 4.6 (higher judgment, ~4x cost)         │
+│                                                              │
+│   ☐ Aggressive Pass 2 (target ≤50% chain reduction)          │
+│   ☐ Skip purpose pre-pass (saves ~$0.005)                    │
+│                                                              │
+│   Force-keep last N turns: [ 30 ] (recency safety net)       │
+│                                                              │
+│   Estimated cost: $0.50–0.75                                 │
+│                                                              │
+│           ┌────────────────────────────┐                     │
+│           │   ANALYZE                  │                     │
+│           └────────────────────────────┘                     │
+│                                                              │
+│   ─── status: not yet analyzed ───                           │
+│                                                              │
+└──────────────────────────────────────────────────────────────┘
+```
+
+**After analyze completes, Step 2 appears:**
+
+```
+│  Step 2: Review plan                                         │
+│                                                              │
+│   Purpose: "This session is investigating CouchDB→Postgres   │
+│              migration paths for the InfiniQuest backend..." │
+│                                                              │
+│   Pass 2 decisions: 250 turns → 167 keep / 76 drop / 7 distill│
+│                                                              │
+│   Value-score distribution:                                  │
+│     0–30   ████ 15 turns (~13K tokens)                       │
+│     31–50  ██ 9 turns (~8K)                                  │
+│     51–70  ███ 12 turns (~14K)                               │
+│     71–85  ███████████████ 78 turns (~140K)                  │
+│     86–100 █████████████████ 89 turns (~120K)                │
+│                                                              │
+│   [Show top droppable turns]  [Show top kept turns]          │
+│                                                              │
+│  Step 3: Apply (with optional score-threshold override)      │
+│                                                              │
+│   Apply mode:  ( ) orphan (default — entries stay in file,   │
+│                            unreachable from chain walks)     │
+│                ( ) physical-remove (smaller file)            │
+│                                                              │
+│   ☐ Score-threshold override (recompute actions from score)  │
+│      min_keep_score:    [ 86 ]   ← keep verbatim if ≥        │
+│      min_distill_score: [ 31 ]   ← distill if score in       │
+│                                     between, drop if below   │
+│                                                              │
+│           ┌────────────────────────────┐                     │
+│           │   APPLY PLAN               │                     │
+│           └────────────────────────────┘                     │
+└──────────────────────────────────────────────────────────────┘
+```
+
+**Step 1 controls:**
+
+| Control | Default | Tooltip |
+|---|---|---|
+| Model: Haiku 4.5 | ☑ default | "Cheaper (~4x), uses separate rate-limit budget from Sonnet. Recommended unless you need higher-judgment semantic decisions." |
+| Model: Sonnet 4.6 | — | "Higher judgment quality. ~4x cost. Uses Sonnet rate budget — competes with active Sonnet sessions." |
+| Aggressive Pass 2 | ☐ off | "Pass 2 prompt explicitly targets ≤50% chain reduction. Drops more turns, distills more readily, keeps fewer verbatim. Use when you've accepted information loss for context savings." |
+| Skip purpose pre-pass | ☐ off | "Skip the cheap (~$0.005) Haiku pre-pass that derives a 3-5 sentence 'what is this session about' summary. The summary informs Pass 1 + Pass 2 judgment. Skipping loses some context-aware judgment quality but saves a tiny amount of money." |
+| Force-keep last N turns | 30 | "Recency safety net. After Pass 2 produces decisions, override the last N turns to action='keep' regardless. The agent needs verbatim recent state to know what it was just doing. Set to 0 to disable (let Pass 2 decide all turns)." |
+
+**Step 2 displays:**
+- Purpose summary (from the analyze plan's `purpose` field)
+- Decision tally (from the plan's `pass2.turnDecisions`)
+- Value-score histogram (computed from `pass1.summaries[].value_score`)
+- Drill-in: clicking "Show top droppable" lists turns with low scores; "top kept" lists high scores
+
+**Step 3 controls:**
+
+| Control | Default | Tooltip |
+|---|---|---|
+| Apply mode: orphan | ☑ default | "Dropped turns stay in the JSONL file (unreachable from chain walks but inspectable via inspect_pruned_messages). Reversible by re-linking parentUuids. Same context-window outcome as physical-remove; preserves history on disk." |
+| Apply mode: physical-remove | — | "Dropped entries removed from the file entirely. Smaller disk footprint but historical content only recoverable from .archive-backups/." |
+| Score-threshold override | ☐ off | "Recompute per-turn actions directly from the value_score Pass 1 emitted, ignoring Pass 2's keep/drop choices. Useful when you want a different aggressiveness without re-analyzing. Only available if the plan was generated by analyze-v2 with value_scores." |
+| min_keep_score | 86 (when override on) | "Turns with value_score ≥ this stay verbatim. Range 0-100. Higher = more aggressive (keeps less)." |
+| min_distill_score | 31 (when override on) | "Turns with min_keep_score > value_score ≥ this get distilled (replaced with 1-2 sentence summary). Below this, dropped entirely. Range 0-100." |
+
+**Backend flow for Step 1:**
+```
+POST /api/analyze
+{ conversation_id, model, aggressive, skip_purpose, force_keep_recent_n }
+→ { ok, planId, checksum, planSummary: { ...purpose, decisions, scoreHistogram } }
+```
+
+**Backend flow for Step 3:**
+```
+POST /api/apply
+{ planId, checksum, confirm: true, orphan_drops, min_keep_score?, min_distill_score? }
+→ { ok, report, restoreCommand }
+```
+
+---
+
+## Tab 4: History
+
+**Purpose:** show the run log + cumulative stats + restore picker.
+
+```
+┌──────────────────────────────────────────────────────────────┐
+│  Condense History — claude-loop120                           │
+├──────────────────────────────────────────────────────────────┤
+│                                                              │
+│  Cumulative: 487 blocks condensed, 658 KB raw saved over     │
+│  3 runs (this session)                                       │
+│                                                              │
+│  ┌──────────┬──────────┬─────────────┬───────────────────┐   │
+│  │ When     │ Modes    │ Δ size      │ Actions           │   │
+│  ├──────────┼──────────┼─────────────┼───────────────────┤   │
+│  │ 18:34    │ all 8    │ -2,119 KB   │ [restore] [view]  │   │
+│  │ 18:13    │ all 8    │ -414 KB     │ [restore] [view]  │   │
+│  │ 18:00    │ images   │ -152 KB     │ [restore] [view]  │   │
+│  └──────────┴──────────┴─────────────┴───────────────────┘   │
+│                                                              │
+│  Per-mode effectiveness (across this session):               │
+│   thinking         145 blocks   287 KB                       │
+│   refetch-markers   84 blocks   225 KB                       │
+│   mcp-snapshots      9 blocks    82 KB                       │
+│   ... etc                                                    │
+│                                                              │
+│  Available backups (last 3 retained):                        │
+│   ▸ e47eaf10.1778625179591.jsonl  18:34  (latest)            │
+│   ▸ e47eaf10.1778624363921.jsonl  18:13                      │
+│   ▸ e47eaf10.1778623998410.jsonl  18:00                      │
+│                                                              │
+└──────────────────────────────────────────────────────────────┘
+```
+
+**Data sources:**
+- Run history table: parse `<conv_dir>/.condense-log/<convId>.jsonl` line by line, render most recent first
+- Cumulative stats: sum the `bytesSaved` and `totalBlocksTouched` fields across all log entries
+- Per-mode chart: aggregate `bytesSaved.<mode>` and `blocksCondensed.<mode>` across all runs
+- Backups list: `ls -t <conv_dir>/.condense-backups/<convId>.*.jsonl`
+
+**Actions per row:**
+- **[restore]** → opens confirmation modal: "Restore <convId>.jsonl from this backup? Current state will be overwritten (a pre-restore snapshot will be saved automatically)." On confirm, calls `restore_archive_backup({backupPath: <path>})`.
+- **[view]** → modal showing the full run report (the markdown text from the original tool output).
+
+---
+
+## Sidebar widget (compact, on session card)
+
+For session cards in the dashboard's main grid:
+
+```
+┌──────────────────────────────────────────────────┐
+│ claude-loop120 · 98% AC · 12.5 MB                │
+│ ─────────────────────────────────────────────    │
+│ [⚡ Quick Condense]  [⚙ Configure]  [📜 History] │
+└──────────────────────────────────────────────────┘
+```
+
+Three buttons. First opens a confirm modal then runs Quick Condense. Second + Third open the full Smart Archival panel on the respective tab.
+
+**Indicator badges:**
+- 🆕 if no condense has ever been run on this session
+- 💾 with hover-tooltip "Last condense X minutes ago, saved Y KB"
+- ⚠️ with hover-tooltip if the last run had errors (parsed from the run log's content)
+
+---
+
+## Backend endpoints summary
+
+| Method | Path | Purpose |
+|---|---|---|
+| POST | /api/condense | run condense_jsonl_blocks |
+| POST | /api/analyze | run analyze_for_archive |
+| POST | /api/apply | run apply_archive_plan |
+| POST | /api/restore | run restore_archive_backup |
+| GET  | /api/condense-history?convId=... | parse run log, return runs + cumulative stats |
+| GET  | /api/backups?convId=... | list backups in .condense-backups/ |
+| GET  | /api/session-status?convId=... | return chain length, file size, AC% (from context_status), last condense time |
+
+All POST endpoints shell out to a tiny Node wrapper that imports the relevant tool and calls its handler. All GET endpoints just read filesystem state.
+
+## Color-coded risk legend (use somewhere visible in Configure tab)
+
+- ✓ none — content is provably re-fetchable or was duplicate
+- ◐ low — content is re-fetchable via standard tool but agent has to know to re-fetch
+- ◐ mid — agent's record of past actions becomes shorter; structural info preserved
+- ◑ unknown — empirical effect measurable but qualitative impact untested
+
