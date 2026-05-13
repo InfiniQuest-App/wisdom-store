@@ -135,6 +135,41 @@ function looksLikeImageBase64(toolResultText, precedingToolUseInput) {
   return false;
 }
 
+// Git-clean check for opt-in Edit-args condensation. Returns true when the
+// file at filePath is tracked AND has no uncommitted changes — meaning the
+// chain Edit args are recoverable from git log -p <file>.
+const _gitCleanCache = new Map();
+function isFileGitClean(filePath) {
+  if (!filePath || typeof filePath !== 'string') return false;
+  if (_gitCleanCache.has(filePath)) return _gitCleanCache.get(filePath);
+  try {
+    const { execSync } = require('child_process');
+    // git status --porcelain returns empty string if file is clean (and tracked).
+    // Returns "?? <file>" if untracked, " M <file>" if modified, etc.
+    // Run in the file\'s directory so git can find the repo.
+    const dir = path.dirname(filePath);
+    const result = execSync(`git status --porcelain -- ${JSON.stringify(filePath)}`, {
+      cwd: dir, encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'], timeout: 2000
+    }).trim();
+    // Empty result = clean (or not tracked — verify with ls-files)
+    let isClean = false;
+    if (result === '') {
+      // Either tracked-and-clean OR not tracked at all. Verify it\'s tracked.
+      try {
+        execSync(`git ls-files --error-unmatch -- ${JSON.stringify(filePath)}`, {
+          cwd: dir, stdio: 'ignore', timeout: 2000
+        });
+        isClean = true;
+      } catch { isClean = false; }
+    }
+    _gitCleanCache.set(filePath, isClean);
+    return isClean;
+  } catch {
+    _gitCleanCache.set(filePath, false);
+    return false;
+  }
+}
+
 function isMcpSnapshotTool(toolName) {
   if (!toolName || typeof toolName !== 'string') return false;
   return MCP_SNAPSHOT_TOOL_PATTERNS.some(re => re.test(toolName));
@@ -739,9 +774,27 @@ export function buildCondensePlan(chainFullEntries, opts = {}) {
       if (turn_id != null && totalTurns > 0 && turn_id > recentBoundary) continue;
 
       let modified = false;
+      // Per-call decision: which fields to condense?
+      // - TOOL_ARGS_FIELDS handles always-safe tools (TaskCreate, etc.)
+      // - When opts.condenseEditArgsWhenGitClean is true, ALSO condense Edit-style
+      //   tools when their file_path is currently git-clean (diff recoverable from
+      //   git log -p). Per-file safety check; cached within the run.
+      const editTools = {
+        'Edit': ['old_string', 'new_string'],
+        'Write': ['content'],
+        'mcp__codegen__manualFileEdit': ['old_string', 'new_string'],
+        'mcp__codegen__manualFileWrite': ['content']
+      };
       const newContent = c.map((b, bIdx) => {
         if (b?.type !== 'tool_use') return b;
-        const fields = TOOL_ARGS_FIELDS[b.name];
+        let fields = TOOL_ARGS_FIELDS[b.name];
+        if (!fields && opts.condenseEditArgsWhenGitClean === true && editTools[b.name]) {
+          // Conditional: only if the target file is git-clean
+          const fp = b.input?.file_path;
+          if (fp && isFileGitClean(fp)) {
+            fields = editTools[b.name];
+          }
+        }
         if (!fields) return b;
         if (isAlreadyCondensed(sidecar, entry.uuid, bIdx)) return b;
         // Check if any of this tool's "long" fields is condensable
@@ -755,7 +808,11 @@ export function buildCondensePlan(chainFullEntries, opts = {}) {
           const preview = val.slice(0, TOOL_ARGS_PREVIEW_CHARS);
           const elidedLen = val.length - preview.length;
           // Marker: keep preview, signal elision, point to backup
-          newInput[fieldName] = `${preview}... [${elidedLen} more chars elided; full original in .condense-backups/. Tool: ${b.name}, field: ${fieldName}]`;
+          const isEditTool = ['Edit', 'Write', 'mcp__codegen__manualFileEdit', 'mcp__codegen__manualFileWrite'].includes(b.name);
+          const recoveryHint = isEditTool && b.input?.file_path
+            ? ` See \`git log -p ${b.input.file_path}\` for diff history; file was git-clean at condense time.`
+            : ' Full original in .condense-backups/.';
+          newInput[fieldName] = `${preview}... [${elidedLen} more chars elided.${recoveryHint} Tool: ${b.name}, field: ${fieldName}]`;
           originalBytesField += val.length;
           touched = true;
         }

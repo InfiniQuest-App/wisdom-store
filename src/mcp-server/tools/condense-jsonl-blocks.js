@@ -97,6 +97,7 @@ export async function handleCondenseJsonlBlocks(args = {}) {
   }));
 
   const sidecar = loadCondenseMeta(filePath);
+  const condenseEditArgsWhenGitClean = args.condense_edit_args_when_git_clean === true;
   // LLM-summary pre-pass (when summarize_with_llm: true AND refetch-markers in modes)
   // Builds a uuid:blockIdx → summary map to pass into buildCondensePlan.
   let refetchSummariesByUuid = null;
@@ -173,10 +174,10 @@ export async function handleCondenseJsonlBlocks(args = {}) {
     const lastUuid = chain[chain.length - 1].data.uuid;
     planUsed = findMatchingV2Plan(filePath, chain.length, lastUuid);
     usingThinkingFallback = !planUsed;
-    extraOpts = { plan: planUsed, turnsByEntryUuid, totalTurns: turns.length, thinkingMarkerStyle: args.thinking_marker_style || 'minimal', keepRecentTurns: args.keep_recent_turns, refetchSummariesByUuid };
+    extraOpts = { plan: planUsed, turnsByEntryUuid, totalTurns: turns.length, thinkingMarkerStyle: args.thinking_marker_style || 'minimal', keepRecentTurns: args.keep_recent_turns, refetchSummariesByUuid, condenseEditArgsWhenGitClean: args.condense_edit_args_when_git_clean === true };
   }
 
-  const { replace, stats } = buildCondensePlan(chainFullEntries, { modes, ...extraOpts, sidecar });
+  const { replace, stats } = buildCondensePlan(chainFullEntries, { modes, ...extraOpts, sidecar, condenseEditArgsWhenGitClean: extraOpts.condenseEditArgsWhenGitClean ?? condenseEditArgsWhenGitClean });
   const totalCondensed = stats.imagesCondensed + stats.memoryReadsCondensed + stats.identicalReadsCondensed + (stats.thinkingCondensed || 0) + (stats.staleReadsCondensed || 0) + (stats.mcpSnapshotsCondensed || 0) + (stats.refetchMarkersCondensed || 0) + (stats.toolArgsCondensed || 0);
   const totalBytesSaved = stats.imagesBytesSaved + stats.memoryReadsBytesSaved + stats.identicalReadsBytesSaved + (stats.thinkingBytesSaved || 0) + (stats.staleReadsBytesSaved || 0) + (stats.mcpSnapshotsBytesSaved || 0) + (stats.refetchMarkersBytesSaved || 0) + (stats.toolArgsBytesSaved || 0);
 

@@ -583,6 +583,11 @@ const TOOLS = [
           type: 'boolean',
           description: 'When true, runs a Haiku pre-pass to generate per-block summaries for refetch-markers mode. Cached system prompt amortizes cost across blocks (~$0.001/block; ~$0.05-0.15 per typical session). Falls back to heuristic section-summary on individual call failures. Recommended for sessions where the agent will need to act on elided content without re-fetching.',
           default: false
+        },
+        condense_edit_args_when_git_clean: {
+          type: 'boolean',
+          description: 'OPT-IN: condense Edit/Write/manualFileEdit/manualFileWrite tool_use args when the target file is currently clean in git (no uncommitted changes). Diff recoverable via `git log -p <file>`. Default off — Edit args are normally the canonical chain record of what changed. Per-file git status check (cached); files that are untracked, dirty, or not in a git repo are always preserved.',
+          default: false
         }
       }
     }
