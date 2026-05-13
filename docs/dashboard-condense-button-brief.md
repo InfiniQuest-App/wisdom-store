@@ -161,3 +161,114 @@ The handler shells out to a node script wrapping `handleCondenseJsonlBlocks` and
 - Mode picker + advanced settings: ~1 hr
 
 **MVP (button + minimal display): ~1 hour total.**
+
+---
+
+# Appendix: Full argument reference + broader pipeline
+
+The MVP button only needs `condense_jsonl_blocks` with default modes. But there's a richer pipeline available — useful if the dashboard wants a "Smart archival" panel rather than just a button.
+
+## All 8 condense modes (current)
+
+| Mode | What it does | LLM cost | Risk |
+|---|---|---|---|
+| `images` | base64 image content in tool_results → `[image elided]` markers | $0 | None — image re-readable from file path |
+| `memory-reads` | Older reads of memory-style files (MEMORY.md, .wisdom/*, CLAUDE.md, plans/*.md) → marker | $0 | None — file re-readable |
+| `identical-reads` | Reads with byte-identical content (any path) — older copies → marker | $0 | None — content was identical |
+| `stale-reads` | Same path + same offset + same limit, multiple times — older → marker | $0 | None — strict args match |
+| `mcp-snapshots` | Older copies of MCP status-snapshot tool_results (get_suggestions, get_session_info, etc.) → marker | $0 | None — newer copy supersedes |
+| `refetch-markers` | tool_result content for read-only/idempotent tools → summary head/tail + re-fetch pointer | $0 | Low — agent can re-fetch via standard tool |
+| `tool-args` | Verbose string fields in tool_use INPUTS for: TaskCreate, mcp__orchestrator__create_session, mcp__orchestrator__assign_task, Edit, Write, mcp__codegen__manualFile{Edit,Write} | $0 | Mid — agent's record of "what I sent" becomes preview + pointer; structural fields (subject/file_path) preserved |
+| `thinking` | Thinking blocks (mostly signatures) → `[thinking elided]` markers; uses Pass 1 turn-summary if a v2 plan exists, else heuristic fallback | $0 | Unknown — signatures might serve as continuation primer for the model; empirically AC% drops when removed but qualitative quality hasn't been A/B tested |
+
+**Recommended default for "Condense" button:** all 8.
+**Conservative subset** (no risk): `['images', 'memory-reads', 'identical-reads', 'stale-reads', 'mcp-snapshots']`.
+**Aggressive subset**: add `['refetch-markers', 'tool-args', 'thinking']`.
+
+## All `condense_jsonl_blocks` arguments
+
+| Arg | Type | Default | Purpose |
+|---|---|---|---|
+| `conversation_id` | string | (lookup) | UUID of conversation. If omitted AND `jsonl_path` omitted, finds most-recently-modified for current project |
+| `jsonl_path` | string | — | Explicit JSONL path. **Bypasses UUID lookup** — required when testing on a copy or when multiple files share the UUID across dirs |
+| `modes` | string[] | all 8 | Which modes to apply (subset of the 8 above) |
+| `dry_run` | bool | false | Preview only; no mutation. Recommended for first run on any new file |
+| `thinking_marker_style` | enum | `minimal` | `minimal` = `[thinking elided]` (~17 chars). `verbose` = `[thinking elided ~3 KB; turn outcome: <Pass 1 summary>]` (~150-500 chars; only useful with v2 plan) |
+| `keep_recent_turns` | int | adaptive | Override the "skip last N turns" floor. Default: `min(30, ceil(totalTurns/2))` — adapts to short chains |
+
+## Broader smart-archival pipeline (the LLM-assisted path)
+
+`condense_jsonl_blocks` is the **heuristic-only, $0** layer. For deeper trim with LLM judgment, three more tools exist:
+
+### `analyze_for_archive` (LLM-assisted, ~$0.50/run)
+
+Two-pass LLM analysis (Haiku) producing a per-uuid plan: keep / drop / distill per turn, with value scores 0-100.
+
+| Arg | Type | Default | Purpose |
+|---|---|---|---|
+| `conversation_id` | string | (lookup) | UUID |
+| `max_turns` | int | all | If set, only process the first N turns (sample-mode for cheap preview) |
+| `concurrency` | int | 5 | Max in-flight Pass-1 Haiku calls (capped at 10) |
+| `disable_prefilter` | bool | false | Skip the heuristic pre-filter (`micro` / `system_or_meta` turns get a synthetic Pass-1 summary without a Haiku call) |
+| `aggressive` | bool | false | Pass-2 uses an aggressive prompt (target ≤50% chain reduction, drops more, distills more) |
+| `force_keep_recent_n` | int | 30 | Recency safety net — last N turns force-kept regardless of Pass-2 decisions |
+| `skip_purpose` | bool | false | Skip the cheap (~$0.005) Haiku purpose pre-pass that derives a 3-5 sentence "what is this session about" summary. The summary informs Pass 1 + Pass 2 judgment AND is persisted in the plan file (dashboard-reusable). |
+| `allowApiKey` | bool | false | Refuses by default if OAuth (subscription billing) isn't available — explicit opt-in to fall back to ANTHROPIC_API_KEY |
+
+Output: a plan file at `<conv_dir>/.archive-plans/<planId>.json` with `planId` + `checksum` + per-turn summaries with `value_score`.
+
+### `apply_archive_plan` (executes a plan, $0)
+
+Validates checksum + drift + TTL, then mutates the JSONL via shared atomic-rewrite.
+
+| Arg | Type | Default | Purpose |
+|---|---|---|---|
+| `planId` | string | required | From analyze output |
+| `checksum` | string | required | Tamper guard (sha256 of plan core) |
+| `confirm` | bool | required true | Must explicitly opt-in (destructive) |
+| `orphan_drops` | bool | true | Drops ORPHAN entries (stay in file, unreachable from chain walks; inspectable via `inspect_pruned_messages`). Set false for physical-remove. |
+| `min_keep_score` | int (0-100) | — | Score-threshold override: turns with value_score ≥ this stay verbatim. Recomputes Pass-2 actions from value_score directly. |
+| `min_distill_score` | int (0-100) | — | Companion: min_keep_score > score ≥ min_distill_score → distill. Below min_distill_score → drop. |
+
+Output: condense report with per-uuid stats. Backup at `<conv_dir>/.archive-backups/<convId>.<epoch>.jsonl` (last 3 retained).
+
+### `restore_archive_backup` (undo any apply or condense, $0)
+
+| Arg | Type | Default | Purpose |
+|---|---|---|---|
+| `conversation_id` | string | (lookup) | UUID |
+| `backupPath` | string | most recent | Specific backup file. Without this, restores the most-recent backup (which may be the wrong one if you want to roll back further). |
+
+Captures a pre-restore snapshot so the restore itself is reversible.
+
+## Suggested dashboard control panel
+
+If you want a richer interface (vs single button):
+
+**Tab 1 — "Quick Condense" (the simple button):**
+- One click, all 8 modes, `thinking_marker_style: minimal`
+- Shows result: bytes saved, blocks touched, "X% smaller"
+- Restore button (latest backup)
+
+**Tab 2 — "Configure Condense":**
+- Mode checkboxes (8 modes, all checked by default with conservative/aggressive presets)
+- `thinking_marker_style` dropdown (minimal/verbose)
+- `keep_recent_turns` slider (default "adaptive" with manual override)
+- Dry-run checkbox
+- Run button
+
+**Tab 3 — "LLM-Assisted Archival" (advanced):**
+- Step 1: Analyze (model selector, aggressive checkbox, force_keep_recent_n slider)
+- Step 2: Review plan (show purpose summary, per-turn decisions, value_score histogram)
+- Step 3: Apply (orphan/physical-remove toggle, score-threshold sliders for tuning aggressiveness without re-analyzing)
+- Estimated cost displayed at each step
+
+**Tab 4 — "History":**
+- Per-session run log (parsed from `.condense-log/<convId>.jsonl`)
+- Cumulative savings chart
+- Restore-from-backup picker (any of last 3)
+
+**Sidebar widget on session card:**
+- Current AC% (from Claude Code's footer if accessible; else from our `context_status` tool)
+- "Condense" quick-button + "Configure" link
+- Indicator badge if a recent backup or sidecar exists
