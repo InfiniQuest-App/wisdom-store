@@ -783,3 +783,201 @@ Strategy:  ( ) 🛡️ Safe & Free      ── 5 zero-risk modes, no LLM
 Selecting a strategy auto-toggles the appropriate modes in the checkbox list (which becomes read-only unless "Customize" is clicked). "Customize" reveals all 8 mode toggles + advanced args.
 
 For the LLM-assisted Strategy 3 selection, the "APPLY CONFIGURATION" button changes label to "RUN HEURISTIC + ANALYZE + APPLY" to make the multi-step nature obvious, and shows the estimated cost ($0.50–$0.75) before clicking.
+
+---
+
+# Single-screen design (supersedes the 4-tab layout above)
+
+Tabs are wrong for this widget — for a per-session control panel, all options should be visible (or one disclosure away) on one screen. **3 strategy buttons primary, advanced settings hidden behind a disclosure, history at the bottom.**
+
+```
+┌── Smart Archival ─────────────────────────────────────────────────────────────┐
+│  claude-loop120 · e47eaf10 · 1247 entries · 12.5 MB · ctx: 98% AC             │
+│  Last condense: never                                                         │
+├───────────────────────────────────────────────────────────────────────────────┤
+│                                                                               │
+│  Strategy:                                                                    │
+│                                                                               │
+│   ┌────────────────────┐  ┌────────────────────┐  ┌────────────────────┐    │
+│   │  🛡 Safe & Free  ⓘ │  │ ⚖ Default        ⓘ │  │ 🧠 Deep          ⓘ │    │
+│   │                    │  │  ★ recommended     │  │                    │    │
+│   │  5 modes, no LLM   │  │  All 8, no LLM     │  │  All 8 + ~$0.50    │    │
+│   │  Zero risk         │  │  Best balance      │  │  LLM judgment      │    │
+│   │  ~2-10% AC saved   │  │  ~10-25% AC saved  │  │  ~30-50% AC saved  │    │
+│   └────────────────────┘  └────────────────────┘  └────────────────────┘    │
+│                                                                               │
+│   ☐ Dry run (preview without modifying)                                       │
+│                                                                               │
+│   [▾ Advanced settings]                                                       │
+│                                                                               │
+│              ┌────────────────────────────────────┐                           │
+│              │   GO                               │                           │
+│              └────────────────────────────────────┘                           │
+│                                                                               │
+├───────────────────────────────────────────────────────────────────────────────┤
+│  ▾ Recent runs                                                                │
+│    18:34  Default  -2,119 KB  ✓  [restore] [details]                          │
+│    18:13  Default    -414 KB  ✓  [restore] [details]                          │
+│    18:00  Custom     -152 KB  ✓  [restore] [details]                          │
+└───────────────────────────────────────────────────────────────────────────────┘
+```
+
+## The 3 strategy cards (primary affordance)
+
+Each card is a clickable button with:
+- **Title** + emoji (🛡 / ⚖ / 🧠)
+- **One-line summary** (modes + cost + risk)
+- **Impact estimate** (typical AC reduction)
+- **ⓘ icon** in the corner — clicking opens a popover with the FULL strategy description (the use-case + when-to-use + what-it-won't-touch text from the "Pre-bundled Strategies" section above). Hover also previews the same.
+- **★ recommended** badge on Default
+- Selected card visually highlighted (border, background)
+
+Default selection on widget open: **Default**.
+
+## Common options (always visible)
+
+Just one row:
+- **Dry run** checkbox — applies to all strategies. Tooltip: "Preview what would be condensed without modifying the file. Recommended for the first run on any new session."
+
+## Advanced settings (collapsed disclosure)
+
+Hidden by default. When clicked, reveals:
+
+```
+   ┌─ Advanced settings ──────────────────────────────────────────────────┐
+   │                                                                      │
+   │  ☐ Customize modes (overrides the strategy selection):               │
+   │     ☑ images           ☑ memory-reads     ☑ identical-reads          │
+   │     ☑ stale-reads      ☑ mcp-snapshots    ☑ refetch-markers          │
+   │     ☑ tool-args        ☑ thinking                                    │
+   │                                                                      │
+   │  Thinking marker style:  (•) minimal   ( ) verbose                   │
+   │                                                                      │
+   │  Keep recent N turns:    [adaptive]  [____ override]                 │
+   │                                                                      │
+   │  ─── LLM-Assisted (Strategy 3 only) ───                              │
+   │  Model:  (•) Haiku 4.5   ( ) Sonnet 4.6                              │
+   │  ☐ Aggressive Pass 2                                                 │
+   │  Force-keep last N turns: [ 30 ]                                     │
+   │  Score-threshold override:                                           │
+   │     min_keep_score:    [ 86 ]   min_distill_score: [ 31 ]            │
+   │                                                                      │
+   └──────────────────────────────────────────────────────────────────────┘
+```
+
+- Each control retains its tooltip from the per-control specs above
+- The "Customize modes" checkbox is OFF by default; turning it ON lets the user pick modes manually (overriding the strategy selection)
+- The "LLM-Assisted" sub-section is greyed out unless the user is on Strategy 3 (or has manually enabled `analyze_for_archive` flow via Customize)
+
+## GO button
+
+Label changes based on strategy:
+- 🛡 Safe & Free → "🛡 RUN SAFE CONDENSE"
+- ⚖ Default → "⚖ RUN DEFAULT CONDENSE"
+- 🧠 Deep → "🧠 RUN ANALYZE + APPLY (~$0.50)" — cost surfaced for transparency
+
+After clicking, button becomes a progress indicator. Result inline-replaces the strategy area:
+
+```
+┌──────────────────────────────────────────────────────────────────────────────┐
+│  ✓ Default condense complete                                                 │
+│                                                                              │
+│   File: 12,541 KB → 9,832 KB  (-21.6%)                                       │
+│   Blocks touched: 487 (over 8 modes)                                         │
+│                                                                              │
+│   ▸ thinking         145 blocks  ~287 KB                                     │
+│   ▸ refetch-markers   84 blocks  ~225 KB                                     │
+│   ▸ mcp-snapshots      7 blocks   ~41 KB                                     │
+│   ▸ tool-args          4 blocks    ~8 KB                                     │
+│   ▸ memory-reads       0 blocks    ~0 KB                                     │
+│   ▸ images             0 blocks    ~0 KB                                     │
+│   ▸ stale-reads        0 blocks    ~0 KB                                     │
+│   ▸ identical-reads    0 blocks    ~0 KB                                     │
+│                                                                              │
+│   Backup: e47eaf10.1778625179591.jsonl                                       │
+│                                                                              │
+│   [Restore from this backup]   [View full report]   [Run again]              │
+│                                                                              │
+└──────────────────────────────────────────────────────────────────────────────┘
+```
+
+`[Run again]` returns to the strategy-selection state.
+
+## Recent runs (collapsed disclosure at bottom)
+
+Always visible header (`▾ Recent runs (3)`). Click expands:
+
+```
+   ┌─ Recent runs ─────────────────────────────────────────────────────────┐
+   │                                                                       │
+   │   18:34  ⚖ Default     -2,119 KB  ✓  [restore] [details]              │
+   │   18:13  ⚖ Default       -414 KB  ✓  [restore] [details]              │
+   │   18:00  Custom modes    -152 KB  ✓  [restore] [details]              │
+   │                                                                       │
+   │   [View full history (.condense-log)]                                 │
+   │                                                                       │
+   └───────────────────────────────────────────────────────────────────────┘
+```
+
+- 3 most-recent runs shown by default
+- "View full history" opens a modal with the complete run log (parsed from `.condense-log/<convId>.jsonl`)
+- `[restore]` per row → confirmation modal → `restore_archive_backup({backupPath})`
+- `[details]` per row → modal with the run's full markdown report
+
+## Strategy info popover (the ⓘ button content)
+
+Each strategy's ⓘ opens a popover with the same content from the "Pre-bundled Strategies" section. Example for "🧠 Deep":
+
+```
+┌─ 🧠 Deep (LLM-assisted) ───────────────────────────────────────────────┐
+│                                                                        │
+│  For: sessions where you want semantic per-turn judgment, not just     │
+│  heuristic.                                                            │
+│                                                                        │
+│  How it works:                                                         │
+│   1. Heuristic pass first (all 8 modes — free)                         │
+│   2. LLM analyze (Haiku, ~$0.50) — Pass 1 classifies each turn,        │
+│      Pass 2 makes cross-turn keep/drop/distill decisions               │
+│   3. Apply the plan with score thresholds (default 86/31)              │
+│                                                                        │
+│  LLM cost: ~$0.50–0.75 (Haiku rate budget — doesn't compete with       │
+│  active Sonnet sessions)                                               │
+│                                                                        │
+│  Typical impact: 30–50% AC reduction (combined with the heuristic      │
+│  pre-pass)                                                             │
+│                                                                        │
+│  When to use: session is past the heuristic-only floor (40-60% AC      │
+│  after Default) AND you want to push lower without breaking            │
+│  continuity; OR you want semantic-aware drops (catches duplicate       │
+│  decisions / superseded planning that pure heuristic misses)           │
+│                                                                        │
+│  Tested on: orchestrators (loop168) — added ~8% AC beyond heuristic.   │
+│  Less impactful on workers — their content is mostly tool_results      │
+│  already covered by heuristic refetch-markers.                         │
+│                                                                        │
+│                                                              [Close]   │
+└────────────────────────────────────────────────────────────────────────┘
+```
+
+## Why this beats tabs
+
+- **All primary options visible at once** (3 strategy cards + dry-run + GO)
+- **Advanced settings out of the way** but one click away (disclosure)
+- **History stays visible without page transitions** (collapsed disclosure at bottom)
+- **No mental "where am I" overhead** — the user is always on one screen, just expanding/collapsing sections
+- **Mobile-friendly** if dashboard ever needs to render small (vertical stack)
+
+## Implementation hints
+
+- The 3 strategy cards: simple radio-button-styled cards, one selected at a time
+- ⓘ popovers: any popover/tooltip library; content from the strategy descriptions in this brief
+- Advanced disclosure: native `<details>` element or any accordion library
+- Recent runs disclosure: same — `<details>` works
+- Result inline-replaces the strategy area: just swap content, animate optionally
+
+## TL;DR for the dashboard worker
+
+**Primary content (always visible):** session header + 3 strategy cards + dry-run checkbox + GO button.
+**Secondary (one click away):** advanced settings, recent runs.
+**Right amount of control. No tabs.**
+
