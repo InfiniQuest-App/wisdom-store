@@ -184,6 +184,60 @@ export async function handleCondenseJsonlBlocks(args = {}) {
   try { sidecarPath = saveCondenseMeta(filePath, sidecar); } catch (e) { sidecarPath = `(save failed: ${e.message})`; }
 
   const sizeAfter = fs.statSync(filePath).size;
+
+  // Append-only run log for audit + diagnostic. Captures every condense run's
+  // parameters, results, errors. Located at <conv_dir>/.condense-log/<convId>.jsonl.
+  // Dashboard / future tooling can scan this to surface "condense history" views,
+  // diagnose unexpected outcomes, or compute cumulative savings across runs.
+  try {
+    const logDir = path.join(path.dirname(filePath), '.condense-log');
+    fs.mkdirSync(logDir, { recursive: true });
+    const logPath = path.join(logDir, path.basename(filePath, '.jsonl') + '.jsonl');
+    const logEntry = {
+      at: Date.now(),
+      modes,
+      args: {
+        dry_run: dryRun,
+        conversation_id: args.conversation_id,
+        jsonl_path: args.jsonl_path,
+        thinking_marker_style: args.thinking_marker_style,
+        keep_recent_turns: args.keep_recent_turns
+      },
+      filePath,
+      fileSize: { before: sizeBefore, after: sizeAfter },
+      blocksCondensed: {
+        images: stats.imagesCondensed,
+        memoryReads: stats.memoryReadsCondensed,
+        identicalReads: stats.identicalReadsCondensed,
+        staleReads: stats.staleReadsCondensed || 0,
+        mcpSnapshots: stats.mcpSnapshotsCondensed || 0,
+        refetchMarkers: stats.refetchMarkersCondensed || 0,
+        toolArgs: stats.toolArgsCondensed || 0,
+        thinking: stats.thinkingCondensed || 0
+      },
+      bytesSaved: {
+        images: stats.imagesBytesSaved,
+        memoryReads: stats.memoryReadsBytesSaved,
+        identicalReads: stats.identicalReadsBytesSaved,
+        staleReads: stats.staleReadsBytesSaved || 0,
+        mcpSnapshots: stats.mcpSnapshotsBytesSaved || 0,
+        refetchMarkers: stats.refetchMarkersBytesSaved || 0,
+        toolArgs: stats.toolArgsBytesSaved || 0,
+        thinking: stats.thinkingBytesSaved || 0
+      },
+      totalBlocksTouched: totalCondensed,
+      totalBytesSavedRaw: totalBytesSaved,
+      backupPath,
+      sidecarPath,
+      replacedActual: stats2?.replacedActual || 0,
+      planUsed: planUsed?.planId || null
+    };
+    fs.appendFileSync(logPath, JSON.stringify(logEntry) + '\n');
+  } catch (e) {
+    // Don't fail the run on log write failure — the actual mutation already succeeded
+    console.error('condense-log write failed:', e.message);
+  }
+
   const fileBytesDelta = sizeBefore - sizeAfter;
   const reductionPct = sizeBefore > 0 ? Math.round((100 * fileBytesDelta) / sizeBefore) : 0;
 
