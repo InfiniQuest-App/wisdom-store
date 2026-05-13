@@ -1049,3 +1049,97 @@ Skip these for the first cut. Per-strategy avg is the decision-support primitive
 
 **Total: ~1 hour additional on top of the base widget.**
 
+
+---
+
+# Update for Dashboard Worker (added after LLM-summary mode shipped)
+
+After the brief was originally written, two changes shipped to `condense_jsonl_blocks` that the worker should know about:
+
+## New arg: `summarize_with_llm: bool`
+
+Default `false`. When `true`, the tool runs a per-block Haiku summarization pre-pass and embeds the result in refetch-marker text (instead of the heuristic section-summary). Uses prompt caching (~5K-token cacheable system prompt) so cost amortizes well across blocks in the same run.
+
+**Cost behavior:**
+- First run on a session: ~$0.30 for medium worker (~50-150 condensable blocks); ~$0.50–1.00 for large session (~200-500 blocks)
+- Re-runs within 5min cache TTL: ~$0.05 + per-block fresh content
+- Falls back to heuristic section-summary on individual block failures (Haiku rate-limit, etc.) — the run never fully fails
+
+**Sample marker quality difference (same Bash `git status + log` result):**
+
+Heuristic (free):
+```
+SUMMARY (heuristic — first line of each section split by blank lines):
+  On branch worker/claude-loop151/-p0-find-fix-the-is-paid-sql-emit
+  nothing added to commit but untracked files present...
+```
+
+LLM (Haiku, ~$0.0022 per block with cache):
+```
+SUMMARY (Haiku):
+  Worktree /home/michael/Projects/Computers_Plus_Repair-worktrees/claude-loop151
+  is on branch worker/claude-loop151/-p0-find-fix-the-is-paid-sql-emit with
+  untracked node_modules. Last 5 commits: bcf7a352 (diag: capture pg error
+  context on sync.inbound row failed, P0 invoice is_paid), 546c3ef1 (merge
+  #8 pagination), e7ec66ca (fix pagination root cause 2026-05-04), 639accc1
+  (merge #6 multi-appointment), 2ae7ac81 (merge #7 urgent prod fix). Branch
+  is actively tracking P0 is_paid SQL emission issues.
+```
+
+LLM captures all 5 commits with semantic meaning + inferred theme. Way better signal for the agent.
+
+## Recommended strategy structure (revised)
+
+Three strategies. Default ★ now uses LLM summaries (since cost is small and quality is meaningfully better):
+
+| Strategy | What it does | Cost |
+|---|---|---|
+| 🛡 Safe & Free | All 8 heuristic modes, no LLM | **$0** |
+| ⚖ Default ★ | All 8 heuristic modes + LLM summaries on refetch-markers (`summarize_with_llm: true`) | **~$0.30** |
+| 🧠 Deep | Default + analyze_for_archive + apply_archive_plan (LLM judgment per turn) | **~$0.80** |
+
+**OR** keep Default at $0 (heuristic only) with an explicit toggle: "💡 Richer markers via Haiku (+$0.30)". User decides per-run. The toggle approach is more transparent about cost.
+
+## Updated REST endpoint signature
+
+```
+POST /api/condense
+{
+  "conversation_id": "...",
+  "jsonl_path": "...",
+  "modes": [...],
+  "dry_run": false,
+  "thinking_marker_style": "minimal",
+  "keep_recent_turns": null,        // adaptive default
+  "summarize_with_llm": false       // NEW: opt-in for LLM-summary markers
+}
+
+→ { ok: true, report: <markdown>, structured: { sizeBefore, sizeAfter, ... } }
+```
+
+## Run-log entry now includes LLM cost
+
+When `summarize_with_llm: true`, the run log entry's `bytesSaved.refetchMarkers` is the same; but the report markdown text contains an `[LLM summaries: $X for N blocks in Ts (cached: ... )]` annotation. The worker can either:
+- Just display the full markdown report (simplest)
+- OR parse the cost annotation if you want a structured "$ spent" stat across runs
+
+## Per-strategy stats in the History view
+
+The "Your avg: X% (N runs)" line on each strategy card should classify Default by whether `summarize_with_llm: true` was used. Two options:
+- Treat Default-with-LLM and Default-heuristic as ONE bucket (simpler, but conflates very different cost profiles)
+- Treat them as TWO separate strategies in the UI ("Default" / "Default+LLM" or label them with $ icons)
+
+Suggest the latter for transparency, since the cost difference matters for users.
+
+## Implementation impact
+
+If you've started building the brief MVP already:
+- Add `summarize_with_llm` checkbox/toggle to the Configure tab (or just to Default's card)
+- Update strategy descriptions: Default now mentions "(~$0.30 with richer markers)" if LLM-on by default
+- The /api/condense endpoint accepts the new arg with no other changes
+
+If you haven't started yet:
+- Use the revised strategy structure above
+- Default ★ as "richer markers via Haiku" if you're comfortable with $0.30/run as the recommendation
+
+Either way, no architectural changes needed — just one new arg + one toggle/label.
