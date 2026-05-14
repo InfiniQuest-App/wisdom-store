@@ -50,6 +50,7 @@ import { handleCompactContext } from './tools/compact-context.js';
 import { handleAnnotateWisdom } from './tools/annotate-wisdom.js';
 import { handleInspectPrunedMessages } from './tools/inspect-pruned-messages.js';
 import { handleSandwichPrune } from './tools/sandwich-prune.js';
+import { handlePruneToHandoff } from './tools/prune-to-handoff.js';
 import { handleAnalyzeForArchiveV2 } from './tools/analyze-for-archive-v2.js';
 import { handleCondenseJsonlBlocks } from './tools/condense-jsonl-blocks.js';
 import { handleApplyArchivePlan } from './tools/apply-archive-plan.js';
@@ -141,6 +142,29 @@ const TOOLS = [
           type: 'boolean',
           description: 'If true, physically remove orphaned middle entries from the file (frees disk + breaks inspect_pruned_messages on the dropped range). If false, orphans remain on disk for later inspection. Default: true.',
           default: true
+        }
+      }
+    }
+  },
+  {
+    name: 'prune_to_handoff',
+    description: 'Prune a conversation down to the curated hand-off the session wrote near end-of-life. Scans the chain newest-first for a marker (default "## SESSION HANDOFF"), walks back to the user message that prompted the hand-off, and sets parentUuid:null on it. Everything before is orphaned. Cheaper and more accurate than /compact: the session itself decided what was load-bearing. Pair with the docs/handoff-template.md prompt sent by the dashboard automation hook (or by the user) when context/TTL is approaching its limit. Orphaned entries stay in the JSONL file for recovery.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        conversation_id: {
+          type: 'string',
+          description: 'Conversation UUID. If omitted, finds the most recently modified conversation for the current project.'
+        },
+        marker: {
+          type: 'string',
+          description: 'Stable marker string the hand-off message starts with. Default: "## SESSION HANDOFF". Override only if you authored a custom template.',
+          default: '## SESSION HANDOFF'
+        },
+        dry_run: {
+          type: 'boolean',
+          description: 'If true, report what would be orphaned + show a snippet of the matched hand-off, without modifying the file. Default: false.',
+          default: false
         }
       }
     }
@@ -715,6 +739,8 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         return await handleInspectPrunedMessages(args);
       case 'sandwich_prune':
         return await handleSandwichPrune(args);
+      case 'prune_to_handoff':
+        return await handlePruneToHandoff(args);
       case 'analyze_for_archive':
         return await handleAnalyzeForArchiveV2(args);
       case 'condense_jsonl_blocks':

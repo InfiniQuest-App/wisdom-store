@@ -390,3 +390,30 @@ export function rewriteLine(filePath, lineIndex, newData) {
 export function appendLine(filePath, data) {
   fs.appendFileSync(filePath, '\n' + JSON.stringify(data));
 }
+
+const VALID_ROOT_TYPES = new Set(['user', 'system']);
+
+/**
+ * Walk forward through a chain starting at `startIdx` until we find an entry
+ * whose top-level `type` is 'user' or 'system' — Claude Code refuses to resume
+ * from a chain root that isn't one of those (assistant messages can't be roots).
+ *
+ * Re-reads each candidate from disk via readJsonlLine because chain entries
+ * may be lightweight (>50MB files) and not carry the full type field.
+ *
+ * Returns { idx, entry, fullData, type } for the first valid root, or null if
+ * the entire forward range is non-rootable (caller should treat as fatal).
+ */
+export function findValidRootForward(chain, startIdx, filePath) {
+  let idx = startIdx;
+  while (idx < chain.length) {
+    const entry = chain[idx];
+    const fullData = readJsonlLine(filePath, entry.line) || entry.data;
+    const type = fullData?.type || entry.data.type;
+    if (VALID_ROOT_TYPES.has(type)) {
+      return { idx, entry, fullData, type };
+    }
+    idx++;
+  }
+  return null;
+}
