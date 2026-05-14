@@ -56,6 +56,9 @@ export async function handlePruneToHandoff(args = {}) {
     };
   }
   const dryRun = args.dry_run === true;
+  const keepRecentNExtra = Number.isInteger(args.keep_recent_n_extra) && args.keep_recent_n_extra > 0
+    ? args.keep_recent_n_extra
+    : 0;
 
   const entries = readJsonl(filePath);
   const chain = walkChain(entries);
@@ -120,6 +123,30 @@ export async function handlePruneToHandoff(args = {}) {
     };
   }
 
+  // Buffer mode: walk back keep_recent_n_extra additional chain entries from
+  // the anchor, then keep walking until we land on a valid (user/system) root
+  // — Claude Code refuses non-rootable types. Caps at chain[0].
+  const primaryAnchorIdx = anchorIdx;
+  let bufferAppliedCount = 0;
+  if (keepRecentNExtra > 0 && anchorIdx > 0) {
+    let candidateIdx = Math.max(0, anchorIdx - keepRecentNExtra);
+    while (candidateIdx >= 0) {
+      const full = readJsonlLine(filePath, chain[candidateIdx].line) || chain[candidateIdx].data;
+      const t = full?.type || chain[candidateIdx].data.type;
+      if (VALID_ROOT_TYPES.has(t)) {
+        bufferAppliedCount = anchorIdx - candidateIdx;
+        anchorIdx = candidateIdx;
+        anchorEntry = chain[candidateIdx];
+        anchorFull = full;
+        anchorType = t;
+        break;
+      }
+      candidateIdx--;
+    }
+    // If we walked all the way past index 0 without finding a valid root,
+    // primaryAnchor stays — we just don't apply the buffer.
+  }
+
   const orphanedCount = anchorIdx;
   let orphanedTokens = 0;
   for (let i = 0; i < anchorIdx; i++) {
@@ -136,6 +163,10 @@ export async function handlePruneToHandoff(args = {}) {
     .replace(/\s+$/, '')
     + (handoffText.length - markerOffset > 400 ? '\n…(truncated)' : '');
 
+  const bufferLine = keepRecentNExtra > 0
+    ? `**Buffer**: requested keep_recent_n_extra=${keepRecentNExtra}, applied=${bufferAppliedCount} (primary anchor was chain idx ${primaryAnchorIdx + 1}, anchor walked back to ${anchorIdx + 1})`
+    : null;
+
   if (dryRun) {
     return {
       content: [{
@@ -146,6 +177,7 @@ export async function handlePruneToHandoff(args = {}) {
           `**File**: \`${filePath}\``,
           `**Marker**: \`${marker}\` found at chain index ${markerIdx + 1} of ${chain.length}`,
           `**New chain root**: chain index ${anchorIdx + 1} (${anchorType})`,
+          ...(bufferLine ? [bufferLine] : []),
           `**Would orphan**: ${orphanedCount} of ${chain.length} messages (~${orphanedTokens.toLocaleString()} tokens)`,
           `**Would keep**: ${keptCount} messages from anchor to leaf`,
           ``,
@@ -174,6 +206,7 @@ export async function handlePruneToHandoff(args = {}) {
         `**File**: \`${filePath}\``,
         `**Marker**: \`${marker}\` matched at chain index ${markerIdx + 1} of ${chain.length}`,
         `**New chain root**: chain index ${anchorIdx + 1} (${anchorType})`,
+        ...(bufferLine ? [bufferLine] : []),
         `**Messages orphaned**: ${orphanedCount} (~${orphanedTokens.toLocaleString()} tokens freed)`,
         `**Messages remaining in chain**: ${keptCount}`,
         ``,

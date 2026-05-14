@@ -165,6 +165,11 @@ const TOOLS = [
           type: 'boolean',
           description: 'If true, report what would be orphaned + show a snippet of the matched hand-off, without modifying the file. Default: false.',
           default: false
+        },
+        keep_recent_n_extra: {
+          type: 'integer',
+          description: 'Buffer: keep N additional chain turns from BEFORE the hand-off as a safety pad (in case the hand-off is missing context the next session needs). The tool walks back N entries from the primary anchor, then continues back as needed to land on a valid user/system root. Default: 0 (no buffer — anchor is exactly the message that prompted the hand-off).',
+          default: 0
         }
       }
     }
