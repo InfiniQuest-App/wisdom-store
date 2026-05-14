@@ -70,15 +70,31 @@ export async function handlePruneToHandoff(args = {}) {
     };
   }
 
-  // Scan newest-first for the marker. Re-read full bodies from disk because
-  // chain entries may be lightweight for files >50MB.
+  // Scan newest-first for the marker. Two filters to avoid matching discussion
+  // of the marker (the dashboard-sent prompt, orchestrator-routed messages,
+  // assistant turns quoting the prompt back, spec docs that mention the
+  // string):
+  //   1. Only assistant messages — the hand-off is by definition authored by
+  //      the session itself. User/system turns containing the marker are
+  //      always discussion.
+  //   2. Marker must appear at the START of a line (preceded by \n or start)
+  //      and followed by whitespace or end. This excludes backtick-quoted
+  //      mentions like `## SESSION HANDOFF` and inline references.
+  // Real-world catch from loop16 dogfood: chain had 11 marker occurrences;
+  // newest assistant occurrence was a quote of the prompt, not the actual
+  // hand-off ~7 turns earlier.
+  // Re-read full bodies from disk because chain entries may be lightweight
+  // for files >50MB.
+  const escMarker = marker.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  const markerHeadingRegex = new RegExp(`(^|\\n)${escMarker}(?:\\s|$)`);
   let markerIdx = -1;
   for (let i = chain.length - 1; i >= 0; i--) {
     const full = readJsonlLine(filePath, chain[i].line);
     if (!full) continue;
+    if (full.type !== 'assistant') continue;
     // getMessageContent expects the chain-entry shape { data: ... }
     const text = getMessageContent({ data: full });
-    if (text && text.includes(marker)) {
+    if (text && markerHeadingRegex.test(text)) {
       markerIdx = i;
       break;
     }
@@ -88,7 +104,7 @@ export async function handlePruneToHandoff(args = {}) {
     return {
       content: [{
         type: 'text',
-        text: `No hand-off marker "${marker}" found in any chain message. Did the session write a hand-off? (See docs/handoff-template.md for the expected format.)`
+        text: `No hand-off marker "${marker}" found in any assistant message. Did the session write a hand-off? Note: the marker must appear in an assistant turn (the session writing its own hand-off); occurrences in user/system messages are treated as discussion and skipped. See docs/handoff-template.md.`
       }],
       isError: true
     };
@@ -154,10 +170,16 @@ export async function handlePruneToHandoff(args = {}) {
   }
   const keptCount = chain.length - anchorIdx;
 
-  // Snippet of the hand-off (first ~400 chars after the marker) for the report.
+  // Snippet of the hand-off (first ~400 chars from the marker heading) for
+  // the report. Use the regex to find the heading-line position rather than
+  // indexOf, so we land on the actual heading instead of any earlier inline
+  // mention of the marker string within the same message.
   const markerFull = readJsonlLine(filePath, chain[markerIdx].line);
   const handoffText = getMessageContent({ data: markerFull }) || '';
-  const markerOffset = handoffText.indexOf(marker);
+  const headingMatch = markerHeadingRegex.exec(handoffText);
+  const markerOffset = headingMatch
+    ? headingMatch.index + (headingMatch[1] ? headingMatch[1].length : 0)
+    : handoffText.indexOf(marker);
   const snippet = handoffText
     .slice(markerOffset, markerOffset + 400)
     .replace(/\s+$/, '')
