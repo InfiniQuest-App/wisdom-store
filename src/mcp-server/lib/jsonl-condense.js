@@ -236,6 +236,25 @@ function isAlreadyCondensed(sidecar, uuid, blockIdx) {
   return !!sidecar.entries[uuid]?.blocks?.[String(blockIdx)];
 }
 
+// Upgrade-aware variant for refetch-markers mode: skip the block UNLESS the
+// existing condensation was heuristic AND the current call wants LLM. That
+// case is an upgrade — re-process the block to get the better Haiku summary.
+// Existing sidecar entry shape: { mode, summarySource: 'heuristic'|'pass1'|'haiku' }
+// (summarySource added in this commit; missing on older entries → treat as
+// 'heuristic' for the purpose of upgrade decisions).
+function shouldSkipForRefetchMarker(sidecar, uuid, blockIdx, wantsLLM) {
+  const existing = sidecar?.entries?.[uuid]?.blocks?.[String(blockIdx)];
+  if (!existing) return false;  // not yet condensed → process
+  // If existing was already LLM-summarized, never re-process (no upgrade available).
+  if (existing.summarySource === 'haiku') return true;
+  // If existing was heuristic OR pass1 AND the current call wants LLM,
+  // ALLOW re-process (upgrade path).
+  const existingSource = existing.summarySource || 'heuristic';
+  if (wantsLLM && existingSource !== 'haiku') return false;  // upgrade path
+  // Otherwise skip (idempotent default).
+  return true;
+}
+
 function recordCondense(records, uuid, blockIdx, mode, originalBytes, condensedBytes, extra) {
   records.push([uuid, { blockIdx, mode, originalBytes, condensedBytes, extra }]);
 }
@@ -720,6 +739,11 @@ export function buildCondensePlan(chainFullEntries, opts = {}) {
             if (txt.length < REFETCH_MIN_BYTES) continue;
             const targetUuid = chainFullEntries[j].uuid;
             if (replace.has(targetUuid)) continue; // already scheduled by another mode
+            // Upgrade-aware sidecar check: skip ONLY if existing condensation can\'t be improved.
+            // Heuristic-marked blocks ARE re-processed when the current call has an LLM summary
+            // available (refetchSummariesByUuid populated by the LLM pre-pass in the tool wrapper).
+            const wantsLLMUpgrade = !!(opts.refetchSummariesByUuid && opts.refetchSummariesByUuid.size > 0);
+            if (shouldSkipForRefetchMarker(sidecar, targetUuid, bIdx, wantsLLMUpgrade)) continue;
 
             const pass1TurnSummary = (turn_id != null && opts.plan)
               ? pass1SummariesByTurn(opts.plan).get(turn_id)
@@ -749,6 +773,10 @@ export function buildCondensePlan(chainFullEntries, opts = {}) {
             if (!stats.refetchMarkersBytesSaved) stats.refetchMarkersBytesSaved = 0;
             stats.refetchMarkersCondensed++;
             stats.refetchMarkersBytesSaved += (txt.length - marker.length);
+            // Record with summarySource so future runs can decide upgrade vs skip.
+            const summarySource = llmSummary ? 'haiku' : (pass1TurnSummary ? 'pass1' : 'heuristic');
+            recordCondense(stats._blockCondenseRecords, targetUuid, bIdx, 'refetch-markers',
+              txt.length, marker.length, { summarySource });
             break;
           }
         }

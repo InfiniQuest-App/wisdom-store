@@ -265,7 +265,9 @@ export async function handleCondenseJsonlBlocks(args = {}) {
         conversation_id: args.conversation_id,
         jsonl_path: args.jsonl_path,
         thinking_marker_style: args.thinking_marker_style,
-        keep_recent_turns: args.keep_recent_turns
+        keep_recent_turns: args.keep_recent_turns,
+        summarize_with_llm: args.summarize_with_llm === true,
+        condense_edit_args_when_git_clean: args.condense_edit_args_when_git_clean === true
       },
       filePath,
       fileSize: { before: sizeBefore, after: sizeAfter },

@@ -70,6 +70,9 @@ export function markBlockCondensed(meta, uuid, blockIdx, info) {
     at: info.at || Date.now(),
     originalBytes: info.originalBytes || 0,
     condensedBytes: info.condensedBytes || 0,
+    // Pull summarySource out of extra and persist as a top-level field
+    // (refetch-markers upgrade-path uses it on the next run).
+    ...(info.extra?.summarySource ? { summarySource: info.extra.summarySource } : {}),
     ...(info.extra ? { extra: info.extra } : {})
   };
 }
