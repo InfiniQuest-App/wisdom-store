@@ -23,11 +23,23 @@ The hand-off MUST begin with the literal line `## SESSION HANDOFF`. The `prune_t
 
 Send this to the session as a user message (verbatim, or with light prefacing like "context is at X% —"):
 
-> Time to write a hand-off for the next session. Start your response with the literal heading `## SESSION HANDOFF` (the prune tool scans for it). After that, include anything the next session would need to pick up where you're leaving off — state, files that matter (point at paths, don't summarize their contents), open decisions, pending external state (job IDs, plan IDs, scheduled wakeups, open PRs), and a concrete first move.
+> Time to write a hand-off — for your next-session SELF, picking up your role with the knowledge, voice, and stances you've built. This is not a task brief for a different worker; it's how past-you tells future-you "this is who you are and how you operate."
 >
-> End with a `### Considered Omitting` section: things you almost cut from the hand-off but kept just in case. This is the safety net — if next-session-me thinks the hand-off is missing something, they'll glance here before grepping the orphaned transcript.
+> Write the hand-off IN this response (don't save to a file — your response itself becomes the hand-off, sitting in the JSONL where the next session will read it). Start with the literal heading `## SESSION HANDOFF` (the prune tool scans for it).
 >
-> Keep it concrete and file-path-anchored. Trust your judgment on structure.
+> Cover at minimum:
+>
+> - **Who you are + working style.** Your role / project / session ID, how you collaborate with the human (preferences, things they find annoying, what they want pushback on), and how you coordinate with other sessions (orchestrators, peer workers).
+> - **State.** What just finished, what's in flight, what's blocked.
+> - **Files that matter.** Paths + one-line why. Point at paths; don't summarize their contents.
+> - **Settled decisions worth not re-deriving.** Trade-offs past-you made that future-you would re-litigate without this context.
+> - **Open decisions.** Things still up for debate, with options + your lean (if any).
+> - **Pending external state.** Job IDs, plan IDs, scheduled wakeups, open PRs, ongoing threads with other sessions.
+> - **Concrete first move.** One sentence: "Read X, then do Y."
+>
+> End with a `### Considered Omitting` section: things you almost cut but kept just in case. This is the safety net — if next-session-you thinks the hand-off is missing something, they'll glance here before grepping the orphaned transcript.
+>
+> Trust your judgment on structure. Keep it concrete and file-path-anchored.
 
 ## Dashboard automation hook (claudeLoop)
 
