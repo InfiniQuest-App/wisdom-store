@@ -84,6 +84,16 @@ export async function handlePruneToHandoff(args = {}) {
     if (chainEntry?.rawLine) {
       try { return JSON.parse(chainEntry.rawLine); } catch { return null; }
     }
+    // Non-lightweight reads (files <50MB) already carry the FULL parsed entry in
+    // .data — use it directly. Only the lightweight (>50MB) path strips .data down
+    // to chain fields, and it always carries rawLine (handled above), so anything
+    // reaching here is a full entry. Falling through to readJsonlLine re-scans the
+    // file from line 0 PER entry (~166ms/call on a 31MB/12.7K-line chain), turning
+    // the newest-first marker scan into O(n × linecount) disk thrash — measured
+    // ~1530s for a full scan, blowing the 120s condense-worker timeout. loop16
+    // dogfood 2026-06-20: a 31MB file fell UNDER the 50MB rawLine hot-path and
+    // self-pruned only after ~4 attempts / a stale-lock sweep.
+    if (chainEntry?.data) return chainEntry.data;
     return readJsonlLine(filePath, chainEntry.line);
   };
 
