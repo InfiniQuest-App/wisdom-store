@@ -1,0 +1,494 @@
+/**
+ * JSONL conversation file utilities.
+ *
+ * Claude Code conversations are stored as JSONL files with linked-list structure:
+ * each message has `uuid` and `parentUuid` fields forming a chain.
+ * Setting parentUuid:null on a message makes it a new root, orphaning everything before.
+ */
+
+import fs from 'fs';
+import path from 'path';
+import os from 'os';
+import { StringDecoder } from 'string_decoder';
+
+const CLAUDE_DIR = path.join(os.homedir(), '.claude');
+const PROJECTS_DIR = path.join(CLAUDE_DIR, 'projects');
+
+/**
+ * Derive the project hash directory name from a working directory path.
+ * Claude Code uses the path with / replaced by - (and leading -)
+ * e.g. /home/user/my-project -> -home-user-my-project
+ */
+export function projectHash(cwd) {
+  // Claude Code normalizes both / and _ to - in project directory names
+  return cwd.replace(/[/_]/g, '-');
+}
+
+/**
+ * Find the conversation ID belonging to the calling Claude session.
+ *
+ * The MCP server is spawned as a child of the Claude Code CLI process. That parent
+ * process is invoked with `claude --resume <UUID> --ide` (always — orchestrator-
+ * spawned workers and dashboard-restarted sessions both use --resume). So the
+ * authoritative convId for "the session calling me" is the --resume UUID on the
+ * parent's cmdline. Reading /proc/<ppid>/cmdline returns it directly.
+ *
+ * Why this matters: findConversationFile()'s "most recently modified JSONL in
+ * the project dir" fallback is ambiguous when multiple workers share a project
+ * directory — any of them writing flips "most recent" to that worker's file,
+ * silently routing slash-command sends to the wrong session (loop146 bug:
+ * /add-dir from loop146 routed to loop11 because loop11 had written more
+ * recently in the shared ExampleProject project).
+ *
+ * Returns the UUID string, or null if the parent's cmdline lacks --resume
+ * (fresh-spawn case — caller should fail loudly rather than guess).
+ */
+export function findCallerConvIdFromParent() {
+  try {
+    const ppid = process.ppid;
+    if (!ppid) return null;
+    const cmdline = fs.readFileSync(`/proc/${ppid}/cmdline`, 'utf8');
+    const argv = cmdline.split('\0').filter(Boolean);
+    const resumeIdx = argv.findIndex(a => a === '--resume' || a === '-r');
+    if (resumeIdx >= 0 && resumeIdx + 1 < argv.length) {
+      const candidate = argv[resumeIdx + 1];
+      // Claude conv IDs are UUID-shaped (8-4-4-4-12 hex with hyphens).
+      if (/^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/i.test(candidate)) {
+        return candidate;
+      }
+    }
+  } catch (_) { /* /proc not available, no parent, etc. */ }
+  return null;
+}
+
+/**
+ * Resolve the caller Claude session's working directory by reading the
+ * /proc/<ppid>/cwd symlink. Used by tools that need to scope-check paths
+ * against the caller's project directory (e.g. add_dir).
+ *
+ * Returns the absolute cwd path, or null if /proc isn't available, the
+ * parent went away, or the symlink can't be read. Callers should treat
+ * null as "unknown caller — fail closed" rather than guessing.
+ */
+export function findCallerCwdFromParent() {
+  try {
+    const ppid = process.ppid;
+    if (!ppid) return null;
+    return fs.readlinkSync(`/proc/${ppid}/cwd`);
+  } catch (_) { /* /proc not available, parent gone, etc. */ }
+  return null;
+}
+
+/**
+ * Find the JSONL file for a conversation.
+ * If conversationId is provided, use it directly.
+ * Otherwise, find the most recently modified JSONL in the project directory.
+ */
+export function findConversationFile(conversationId, cwd) {
+  if (conversationId) {
+    // Try the current project dir first
+    const hash = projectHash(cwd || process.cwd());
+    const dir = path.join(PROJECTS_DIR, hash);
+    const filePath = path.join(dir, `${conversationId}.jsonl`);
+    if (fs.existsSync(filePath)) return filePath;
+
+    // Scan all OTHER project dirs. Collect every match and return the most-recently-modified
+    // one — duplicates can exist when Claude Code's folder-naming has changed historically
+    // (e.g. _ → -) or after archive restore creates files in stale dirs while live workers
+    // write to the normalized one. Picking by readdir-order is non-deterministic and can
+    // silently return the stale copy.
+    try {
+      const dirs = fs.readdirSync(PROJECTS_DIR);
+      const matches = [];
+      for (const d of dirs) {
+        if (d === hash) continue; // Already checked above (would have returned)
+        const candidate = path.join(PROJECTS_DIR, d, `${conversationId}.jsonl`);
+        try {
+          const st = fs.statSync(candidate);
+          matches.push({ path: candidate, mtime: st.mtimeMs });
+        } catch { /* not in this folder */ }
+      }
+      if (matches.length === 0) return null;
+      matches.sort((a, b) => b.mtime - a.mtime); // newest first
+      return matches[0].path;
+    } catch { /* ignore */ }
+    return null;
+  }
+
+  // No ID — find most recently modified JSONL for this project
+  const hash = projectHash(cwd || process.cwd());
+  let dir = path.join(PROJECTS_DIR, hash);
+
+  // If exact hash doesn't exist, scan for a matching project dir
+  // (handles edge cases like Claude normalizing special chars differently)
+  if (!fs.existsSync(dir)) {
+    try {
+      const dirs = fs.readdirSync(PROJECTS_DIR);
+      // Look for dirs that share the same base name (last segment)
+      const baseName = hash.split('-').pop();
+      const match = dirs.find(d => d === hash || d.split('-').pop() === baseName);
+      if (match) {
+        dir = path.join(PROJECTS_DIR, match);
+      } else {
+        return null;
+      }
+    } catch { return null; }
+  }
+
+  const jsonlFiles = fs.readdirSync(dir)
+    .filter(f => f.endsWith('.jsonl'))
+    .map(f => ({
+      name: f,
+      path: path.join(dir, f),
+      mtime: fs.statSync(path.join(dir, f)).mtimeMs
+    }))
+    .sort((a, b) => b.mtime - a.mtime);
+
+  return jsonlFiles.length > 0 ? jsonlFiles[0].path : null;
+}
+
+/**
+ * Read all lines from a JSONL file, parsing each as JSON.
+ * Returns array of { line: lineNumber (0-indexed), data: parsedJSON, offset: byteOffset }
+ *
+ * For large files (>50MB), uses a streaming approach that only extracts
+ * the fields needed for chain walking (uuid, parentUuid, type, timestamp).
+ */
+export function readJsonl(filePath, { lightweight = false } = {}) {
+  const stat = fs.statSync(filePath);
+
+  // For large files or lightweight mode, extract only chain-critical fields
+  if (lightweight || stat.size > 50 * 1024 * 1024) {
+    return readJsonlLightweight(filePath);
+  }
+
+  const content = fs.readFileSync(filePath, 'utf8');
+  const lines = content.split('\n').filter(l => l.trim());
+  return lines.map((line, i) => {
+    try {
+      return { line: i, data: JSON.parse(line) };
+    } catch {
+      return { line: i, data: null };
+    }
+  }).filter(e => e.data !== null);
+}
+
+/**
+ * Yield every line of a JSONL file via a CHUNKED synchronous read, so we never
+ * build the whole file as one string (loop45/loop120/loop74 diag, 2026-06-15).
+ *
+ * A plain `fs.readFileSync(filePath,'utf8')` throws "Cannot create a string
+ * longer than 0x1fffffe8 characters" once a transcript exceeds Node's ~512MB max
+ * string length — and `readJsonl()` routes files >50MB through the lightweight
+ * path, so the large-file fast-path was exactly the one that 500'd. Reading in
+ * fixed buffers + splitting into lines incrementally avoids the cap.
+ *
+ * Yields `{ index, line }` for EVERY '\n'-delimited segment (including blanks
+ * and the final post-newline segment), index 0-based — byte-for-byte identical
+ * to the legacy `content.split('\n')` enumeration that prune line-indexing
+ * depends on. StringDecoder preserves multi-byte UTF-8 sequences that straddle a
+ * chunk boundary; `leftover` rejoins a line split across chunks. The fd is closed
+ * in `finally`, so an early `break`/`return` by the consumer still releases it.
+ */
+function* iterJsonlLines(filePath) {
+  const CHUNK = 8 * 1024 * 1024; // 8 MB
+  const decoder = new StringDecoder('utf8');
+  const buf = Buffer.allocUnsafe(CHUNK);
+  const fd = fs.openSync(filePath, 'r');
+  let leftover = '';
+  let index = 0;
+  try {
+    let position = 0;
+    let bytesRead;
+    while ((bytesRead = fs.readSync(fd, buf, 0, CHUNK, position)) > 0) {
+      position += bytesRead;
+      const text = leftover + decoder.write(buf.subarray(0, bytesRead));
+      const parts = text.split('\n');
+      leftover = parts.pop(); // trailing partial line (or '' if chunk ended on \n)
+      for (const part of parts) yield { index: index++, line: part };
+    }
+    leftover += decoder.end(); // flush any buffered trailing bytes
+  } finally {
+    fs.closeSync(fd);
+  }
+  // Final segment = the last element of content.split('\n').
+  yield { index: index++, line: leftover };
+}
+
+/**
+ * Lightweight JSONL reader — extracts only uuid, parentUuid, type, timestamp
+ * using regex instead of full JSON.parse. ~10x faster for large files. Reads via
+ * the chunked iterator so it survives >512MB transcripts. `line` is the 0-based
+ * file line number (counts blanks) — load-bearing for prune rewrites.
+ */
+function readJsonlLightweight(filePath) {
+  const results = [];
+
+  for (const { index: i, line } of iterJsonlLines(filePath)) {
+    if (!line.trim()) continue;
+
+    // Extract key fields with regex (avoids full JSON parse)
+    const uuid = line.match(/"uuid"\s*:\s*"([^"]+)"/)?.[1] || null;
+    const parentUuid = line.includes('"parentUuid":null')
+      ? null
+      : line.match(/"parentUuid"\s*:\s*"([^"]+)"/)?.[1] || undefined;
+    const timestamp = line.match(/"timestamp"\s*:\s*"([^"]+)"/)?.[1] || null;
+
+    // Detect message type — match specific top-level type values
+    // (avoid matching "type":"text" or "type":"thinking" inside content blocks)
+    let type = null;
+    if (line.includes('"type":"user"')) type = 'user';
+    else if (line.includes('"type":"assistant"')) type = 'assistant';
+    else if (line.includes('"type":"system"')) type = 'system';
+    else if (line.includes('"type":"file-history-snapshot"')) type = 'file-history-snapshot';
+    else if (line.includes('"type":"progress"')) type = 'progress';
+    else if (line.includes('"type":"queue-operation"')) type = 'queue-operation';
+
+    // Skip non-message lines (like file-history-snapshot without uuid chain fields)
+    if (!uuid && type === 'file-history-snapshot') continue;
+
+    results.push({
+      line: i,
+      data: { uuid, parentUuid, type, timestamp },
+      rawLine: line  // Keep raw for rewriting
+    });
+  }
+
+  return results;
+}
+
+/**
+ * Read a single line from a JSONL file and fully parse it.
+ * Used when we need full message content for a specific line.
+ */
+export function readJsonlLine(filePath, lineIndex) {
+  // Chunked read via the shared iterator (2026-06-15) — same >512MB string cap
+  // as readJsonlLightweight; don't slurp the whole file just to fetch one line.
+  // nonEmptyCount semantics preserved EXACTLY (returns the lineIndex-th NON-EMPTY
+  // line). The early return closes the iterator's fd via its finally block.
+  let nonEmptyCount = 0;
+  for (const { line } of iterJsonlLines(filePath)) {
+    if (line.trim()) {
+      if (nonEmptyCount === lineIndex) {
+        try { return JSON.parse(line); } catch { return null; }
+      }
+      nonEmptyCount++;
+    }
+  }
+  return null;
+}
+
+/**
+ * Walk the parentUuid chain from the latest message back to the root.
+ * Returns messages in chain order (root first).
+ *
+ * Claude Code reads the chain by finding the latest leaf and walking
+ * parentUuid back to null. We do the same.
+ */
+export function walkChain(entries) {
+  // Build lookup by uuid
+  const byUuid = new Map();
+  for (const entry of entries) {
+    if (entry.data.uuid) {
+      byUuid.set(entry.data.uuid, entry);
+    }
+  }
+
+  // Find the leaf: latest message by timestamp that has a uuid
+  // but no other message points to it as parent... actually simpler:
+  // find all uuids that are NOT referenced as parentUuid by anyone
+  const referenced = new Set();
+  for (const entry of entries) {
+    if (entry.data.parentUuid) {
+      referenced.add(entry.data.parentUuid);
+    }
+  }
+
+  const leaves = entries.filter(e => e.data.uuid && !referenced.has(e.data.uuid));
+
+  // Pick the leaf with the latest timestamp (or last in file)
+  let leaf = leaves[leaves.length - 1];
+  if (leaves.length > 1) {
+    leaf = leaves.reduce((best, e) => {
+      const t1 = new Date(best.data.timestamp || 0).getTime();
+      const t2 = new Date(e.data.timestamp || 0).getTime();
+      return t2 > t1 ? e : best;
+    });
+  }
+
+  if (!leaf) return [];
+
+  // Walk back to root (with cycle guard)
+  const chain = [];
+  const visited = new Set();
+  let current = leaf;
+  while (current) {
+    if (visited.has(current.data.uuid)) break; // Cycle detected
+    visited.add(current.data.uuid);
+    chain.unshift(current);
+    if (current.data.parentUuid === null || current.data.parentUuid === undefined) break;
+    current = byUuid.get(current.data.parentUuid) || null;
+  }
+
+  return chain;
+}
+
+/**
+ * Estimate token count from message content.
+ * Rough approximation: ~4 chars per token for English text/code.
+ */
+export function estimateTokens(text) {
+  if (!text) return 0;
+  return Math.ceil(text.length / 4);
+}
+
+/**
+ * Extract content text from a message entry for token estimation.
+ */
+export function getMessageContent(entry) {
+  const msg = entry.data.message;
+  if (!msg) return '';
+
+  if (typeof msg.content === 'string') return msg.content;
+
+  if (Array.isArray(msg.content)) {
+    return msg.content.map(block => {
+      if (typeof block === 'string') return block;
+      if (block.type === 'text') return block.text || '';
+      if (block.type === 'thinking') return block.thinking || '';
+      if (block.type === 'tool_use') return JSON.stringify(block.input || {});
+      if (block.type === 'tool_result') {
+        if (typeof block.content === 'string') return block.content;
+        if (Array.isArray(block.content)) {
+          return block.content.map(c => c.text || '').join('\n');
+        }
+      }
+      return '';
+    }).join('\n');
+  }
+
+  return '';
+}
+
+/**
+ * Rewrite a specific line in the JSONL file.
+ *
+ * Two safety properties added on top of read-modify-write:
+ *   1) Race guard against a live writer (Claude Code appending mid-edit). We capture the
+ *      file size before reading and re-stat just before write; if size grew, we abort with
+ *      a clear error rather than silently overwriting the worker's appended messages.
+ *   2) Atomic on-disk swap via tmp + rename, so a process kill / power loss can't leave a
+ *      truncated half-written JSONL that breaks Claude Code's chain walking.
+ *
+ * Throws on race or write failure — callers should let it propagate so the user sees it
+ * (vs. data loss being silent).
+ */
+export function rewriteLine(filePath, lineIndex, newData) {
+  const sizeBefore = fs.statSync(filePath).size;
+
+  // TWO-PASS STREAMING (2026-06-15): the old read-modify-write did
+  // fs.readFileSync + lines.join('\n') — TWO >512MB strings that throw on large
+  // transcripts (same cap as readJsonlLightweight; this is the prune write-back).
+  // Pass 1 finds the target line via the chunked iterator; pass 2 streams the
+  // file to a tmp, replacing only that line, so we never hold the whole file as
+  // one string.
+  //
+  // Pass 1 — resolve the file-line index of the `lineIndex`-th NON-EMPTY line.
+  // (Preserves the legacy quirk exactly: if `lineIndex` is out of range the
+  // target stays 0. Left unchanged — fixing it is a separate behavior decision.)
+  let actualIndex = 0;
+  let nonEmptyCount = 0;
+  for (const { index, line } of iterJsonlLines(filePath)) {
+    if (line.trim()) {
+      if (nonEmptyCount === lineIndex) { actualIndex = index; break; }
+      nonEmptyCount++;
+    }
+  }
+  const replacement = JSON.stringify(newData);
+
+  // Race guard: if the file grew while we were reading, a live writer (likely
+  // Claude Code appending a new message) just added bytes we'd silently clobber.
+  // Refuse rather than lose data.
+  const sizeNow = fs.statSync(filePath).size;
+  if (sizeNow !== sizeBefore) {
+    throw new Error(
+      `prune_context: file ${filePath} was modified concurrently ` +
+      `(size ${sizeBefore} → ${sizeNow}). ` +
+      `Aborting to avoid overwriting the writer's appended data. Retry the prune.`
+    );
+  }
+
+  // Pass 2 — stream to a tmp file, replacing the target line. Writing each
+  // segment joined by '\n' reproduces the old `lines.join('\n')` exactly,
+  // including a trailing-newline file's final '' segment. Atomic swap via
+  // same-dir tmp + rename (cross-fs renames degrade to non-atomic copy+delete).
+  const tmpPath = filePath + '.tmp-' + process.pid + '-' + Date.now();
+  const outFd = fs.openSync(tmpPath, 'w');
+  try {
+    let first = true;
+    for (const { index, line } of iterJsonlLines(filePath)) {
+      if (!first) fs.writeSync(outFd, '\n');
+      fs.writeSync(outFd, index === actualIndex ? replacement : line);
+      first = false;
+    }
+    fs.fsyncSync(outFd); // flush to disk before the rename makes it live (power-loss safety)
+  } catch (e) {
+    fs.closeSync(outFd);
+    try { fs.unlinkSync(tmpPath); } catch (_) {}
+    throw e;
+  }
+  fs.closeSync(outFd);
+
+  // Final race re-check: a writer could have appended during pass 2 (after the
+  // guard above). Stricter than the legacy single check — abort rather than ship
+  // a tmp built from a file that changed underneath us.
+  const sizeAfter = fs.statSync(filePath).size;
+  if (sizeAfter !== sizeBefore) {
+    try { fs.unlinkSync(tmpPath); } catch (_) {}
+    throw new Error(
+      `prune_context: file ${filePath} was modified concurrently during rewrite ` +
+      `(size ${sizeBefore} → ${sizeAfter}). Aborting to avoid data loss. Retry the prune.`
+    );
+  }
+
+  try {
+    fs.renameSync(tmpPath, filePath);
+  } catch (e) {
+    try { fs.unlinkSync(tmpPath); } catch (_) {}
+    throw e;
+  }
+}
+
+/**
+ * Append a line to the JSONL file.
+ */
+export function appendLine(filePath, data) {
+  fs.appendFileSync(filePath, '\n' + JSON.stringify(data));
+}
+
+const VALID_ROOT_TYPES = new Set(['user', 'system']);
+
+/**
+ * Walk forward through a chain starting at `startIdx` until we find an entry
+ * whose top-level `type` is 'user' or 'system' — Claude Code refuses to resume
+ * from a chain root that isn't one of those (assistant messages can't be roots).
+ *
+ * Re-reads each candidate from disk via readJsonlLine because chain entries
+ * may be lightweight (>50MB files) and not carry the full type field.
+ *
+ * Returns { idx, entry, fullData, type } for the first valid root, or null if
+ * the entire forward range is non-rootable (caller should treat as fatal).
+ */
+export function findValidRootForward(chain, startIdx, filePath) {
+  let idx = startIdx;
+  while (idx < chain.length) {
+    const entry = chain[idx];
+    const fullData = readJsonlLine(filePath, entry.line) || entry.data;
+    const type = fullData?.type || entry.data.type;
+    if (VALID_ROOT_TYPES.has(type)) {
+      return { idx, entry, fullData, type };
+    }
+    idx++;
+  }
+  return null;
+}

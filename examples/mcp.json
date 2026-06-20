@@ -1,0 +1,9 @@
+{
+  "mcpServers": {
+    "wisdom-store": {
+      "command": "node",
+      "args": ["/path/to/wisdom-store/src/mcp-server/index.js"],
+      "env": {}
+    }
+  }
+}

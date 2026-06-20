@@ -1,0 +1,19 @@
+{
+  "env": { "node": true, "es2024": true, "browser": true },
+  "rules": {
+    "no-undef": "error",
+    "no-unreachable": "error",
+    "no-dupe-keys": "error",
+    "no-duplicate-case": "error",
+    "valid-typeof": "error",
+    "no-self-assign": "error",
+    "no-self-compare": "error",
+    "no-import-assign": "error",
+    "no-empty-pattern": "error",
+    "use-isnan": "error",
+    "no-loss-of-precision": "error",
+    "no-constant-binary-expression": "error",
+    "no-unsafe-negation": "error",
+    "no-unused-vars": "off"
+  }
+}
